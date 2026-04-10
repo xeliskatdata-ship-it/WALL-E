@@ -1,0 +1,44 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === Environnement virtuel ===
+venv/
+env/
+baymax-env/
+.venv/
+
+# === Variables d'environnement ===
+.env
+.env.local
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Modèles lourds (téléchargés à l'install, pas dans le repo) ===
+assets/vosk-model-fr/
+assets/vosk-model-fr*.zip
+
+# === Logs ===
+*.log
+logs/
+
+# === Arduino build ===
+arduino/.build/
+arduino/*.elf
+arduino/*.hex
