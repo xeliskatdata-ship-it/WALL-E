@@ -223,7 +223,7 @@ Principales variables de `config.py` :
 
 ```python
 # Backend LLM
-LLM_BACKEND                 = "claude"               # "claude" ou "ollama"
+LLM_BACKEND                 = "claude"               
 ANTHROPIC_MODEL             = "claude-sonnet-4-6"
 BRAIN_MAX_TOKENS            = 1024
 BRAIN_MAX_TOOL_ITERATIONS   = 10
