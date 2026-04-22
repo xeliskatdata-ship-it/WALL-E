@@ -12,6 +12,7 @@ build/
 venv/
 env/
 baymax-env/
+walle-env/
 .venv/
 
 # === Variables d'environnement ===
@@ -30,9 +31,12 @@ baymax-env/
 Thumbs.db
 desktop.ini
 
-# === Modèles lourds (téléchargés à l'install, pas dans le repo) ===
+# === Modeles lourds (telecharges a l'install, pas dans le repo) ===
 assets/vosk-model-fr/
 assets/vosk-model-fr*.zip
+
+# === Vector DB Phase 8 Brain ===
+data/
 
 # === Logs ===
 *.log

@@ -1,4 +1,4 @@
-// baymax_servo.ino — Firmware Arduino Nano
+// walle_servo.ino — Firmware Arduino Nano
 // Contrôle 6 servos (2 tête + 4 bras) + capteur ultrason HC-SR04
 // Communication série 115200 baud avec le Raspberry Pi
 //

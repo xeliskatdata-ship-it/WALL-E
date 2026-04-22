@@ -13,7 +13,7 @@ import mediapipe as mp
 
 import config
 
-logger = logging.getLogger("baymax.vision")
+logger = logging.getLogger("walle.vision")
 
 # ---------------------------------------------------------------
 # Data classes

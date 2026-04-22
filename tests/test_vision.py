@@ -65,8 +65,8 @@ def test_dry_run():
     logger.info("FaceData dataclass ......... OK")
 
     logger.info("")
-    logger.info("✅ DRY-RUN RÉUSSI — Tous les imports et les classes fonctionnent.")
-    logger.info("   Branche une caméra et relance sans --dry-run pour tester en live.")
+    logger.info("DRY-RUN RÉUSSI — Tous les imports et les classes fonctionnent.")
+    logger.info("Branche une caméra et relance sans --dry-run pour tester en live.")
 
 
 def test_with_camera(headless=False):
@@ -161,14 +161,14 @@ def test_with_camera(headless=False):
     logger.info("")
 
     if frames_received > 0:
-        logger.info("✅ TEST RÉUSSI — La détection de visage fonctionne.")
+        logger.info(" TEST RÉUSSI — La détection de visage fonctionne.")
         if "happy" in emotions_seen or "sad" in emotions_seen or "pain" in emotions_seen:
-            logger.info("✅ BONUS — Des émotions non-neutres ont été détectées !")
+            logger.info(" BONUS — Des émotions non-neutres ont été détectées !")
         else:
-            logger.info("ℹ️  Seule l'émotion 'neutral' a été vue. Normal si tu es resté neutre.")
+            logger.info("  Seule l'émotion 'neutral' a été vue. Normal si tu es resté neutre.")
             logger.info("   Essaie de sourire largement ou de faire une grimace pour tester.")
     else:
-        logger.warning("⚠️  Aucun visage détecté. Vérifie :")
+        logger.warning("  Aucun visage détecté. Vérifie :")
         logger.warning("   - La caméra est branchée et non utilisée par un autre programme")
         logger.warning("   - Tu es face à la caméra avec un éclairage correct")
         logger.warning("   - config.CAMERA_INDEX est le bon index (essaie 0, 1, 2)")

@@ -1,21 +1,31 @@
-# requirements.txt — Baymax
+# requirements.txt - WALL-E
+
 # Phase 2 : Vision
 opencv-python-headless>=4.9
 mediapipe>=0.10
 numpy>=1.26
 
-# Phase 3 : Moteurs (décommenter quand nécessaire)
+# Phase 3 : Moteurs (decommente quand branche Arduino)
 # pyserial>=3.5
 
-# Phase 5 : OLED (décommenter quand nécessaire)
+# Phase 5 : OLED (decommente quand branche)
 # luma.oled>=3.13
 # Pillow>=10.0
 
-# Phase 7 : Audio (décommenter quand nécessaire)
+# Phase 7 : Audio (decommente au deploiement vocal)
 # vosk>=0.3
 # pyaudio>=0.2
 # pyttsx3>=2.90
+# faster-whisper>=1.0        # alternative Whisper local
+# librosa>=0.10              # pipeline effet robot
+# scipy>=1.11                # bandpass filter
+# pygame>=2.5                # playback audio
 
-# Phase 8 : LLM (décommenter quand nécessaire)
+# Phase 8 : Brain (ACTIVE)
+anthropic>=0.40.0
+chromadb>=0.5.0
+python-dotenv>=1.0.0
+duckduckgo-search>=6.0.0
+
+# Phase 8.5 : Fallback offline (optionnel)
 # ollama>=0.3
-# openai>=1.30

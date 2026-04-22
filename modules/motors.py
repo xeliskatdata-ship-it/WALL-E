@@ -9,7 +9,7 @@ import serial
 
 import config
 
-logger = logging.getLogger("baymax.motors")
+logger = logging.getLogger("walle.motors")
 
 
 class MotorsThread(threading.Thread):
