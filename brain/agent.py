@@ -85,6 +85,10 @@ class BrainThread(threading.Thread):
         system = self._build_system(identity, query_hint=user_input)
         tools = filter_tools_for(identity)
 
+        # Fix : Claude envoie souvent du texte AVANT un tool_use (preface).
+        # On cumule les blocs texte a chaque iteration pour ne rien perdre.
+        collected_text = []
+
         for iteration in range(config.BRAIN_MAX_TOOL_ITERATIONS):
             try:
                 resp = _get_client().messages.create(
@@ -96,16 +100,28 @@ class BrainThread(threading.Thread):
                 )
             except Exception as e:
                 logger.exception("Erreur API Claude : %s", e)
-                history.pop()  # on retire le dernier user pour eviter d'accumuler
+                history.pop()
                 return f"Oups, j'ai eu un souci technique : {e}"
 
             history.append({"role": "assistant", "content": resp.content})
 
+            # Texte de ce tour (preface avant tool_use OU reponse finale)
+            iteration_text = "".join(
+                b.text for b in resp.content if b.type == "text"
+            ).strip()
+            if iteration_text:
+                collected_text.append(iteration_text)
+
+            logger.debug("Tour [%s] iter %d : stop=%s, texte=%r, tokens_out=%d",
+                         identity.user_id, iteration + 1, resp.stop_reason,
+                         iteration_text[:80], resp.usage.output_tokens)
+
             if resp.stop_reason != "tool_use":
-                text = "".join(b.text for b in resp.content if b.type == "text")
-                logger.debug("Tour [%s] en %d iter, tokens=%d",
-                             identity.user_id, iteration + 1, resp.usage.output_tokens)
-                return text
+                final = " ".join(collected_text).strip()
+                if not final:
+                    # Filet de securite : Claude n'a rien dit malgre les tools
+                    final = "C'est note !"
+                return final
 
             # Tool use : execute avec ACL
             tool_results = []
@@ -127,6 +143,10 @@ class BrainThread(threading.Thread):
 
             history.append({"role": "user", "content": tool_results})
 
+        # Epuisement des iterations : on retourne ce qu'on a collecte
+        fallback = " ".join(collected_text).strip()
+        if fallback:
+            return fallback + " (j'ai un peu bugge, mais j'ai retenu l'essentiel)"
         return "Desole, j'ai boucle trop longtemps sur mes outils. Reformule ?"
 
     def run(self):

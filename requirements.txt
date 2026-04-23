@@ -29,3 +29,8 @@ duckduckgo-search>=6.0.0
 
 # Phase 8.5 : Fallback offline (optionnel)
 # ollama>=0.3
+# Phase 8.3 partielle : STT local
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.13
+sounddevice>=0.4.7
+numpy>=1.24.0

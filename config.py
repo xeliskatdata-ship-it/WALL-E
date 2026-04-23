@@ -71,3 +71,12 @@ USERS = {
 OBSTACLE_MIN_CM   = 15
 CPU_TEMP_MAX      = 80
 WATCHDOG_TIMEOUT  = 2.0
+
+# === STT (Phase 8.3 partielle, Windows - MVP avant Pi 5) ===
+STT_ENABLED            = True      # False = retour clavier seul
+STT_LANGUAGE           = 'fr-FR'
+STT_SAMPLE_RATE        = 16000
+STT_DEVICE             = None      # None = device par defaut Windows
+STT_SILENCE_THRESHOLD  = None       # amplitude sous laquelle = silence (ajuster si besoin)
+STT_SILENCE_DURATION   = 0.8       # duree de silence pour cloturer la phrase (s)
+STT_MAX_PHRASE         = 10        # plafond dur d'une phrase utilisateur (s)
