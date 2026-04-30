@@ -59,3 +59,14 @@ test_stt_thread.py
 
 .venv311/
 .venv311/
+
+# Phase 8.3 - Modeles Piper (download separement, trop gros pour git)
+models/piper/*.onnx
+models/piper/*.onnx.json
+
+# Scripts de test ponctuels TTS
+test_piper_voices.py
+test_pronunciation.py
+
+# Fichiers de transition
+config_patch*.txt

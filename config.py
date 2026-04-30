@@ -26,13 +26,12 @@ VISION_MIN_CONFIDENCE = 0.5
 VISION_MAX_FACES      = 1
 EMOTION_SMOOTHING     = 5
 
-# === Seuils de detection d'emotion (Phase 8.4 v2) ===
-SMILE_HAPPY_THRESHOLD       = -0.030
-MAR_OPEN_MAX                = 0.6
-EAR_PAIN_THRESHOLD          = 0.20
-BROW_SQUEEZE_PAIN_THRESHOLD = 0.10
-SMILE_SAD_THRESHOLD         = -0.060
-BROW_DROP_SAD_THRESHOLD     = 0.40
+# === Seuils detection emotion (Phase 8.4 v2.1, calibres) ===
+MAR_OPEN_THRESHOLD          = 0.30
+EAR_HAPPY_MAX               = 0.25
+BROW_DROP_PAIN_THRESHOLD    = 0.45
+SMILE_SAD_THRESHOLD         = -0.050
+BROW_DROP_SAD_THRESHOLD     = 0.42
 EMOTION_MIN_SCORE           = 0.40
 EMOTION_SMOOTHING           = 5
 VISION_DEBUG_LOG            = True
@@ -95,3 +94,14 @@ INITIATIVE_MIN_GAP_MINUTES   = (15, 30)
 GUEST_AUTOPURGE_DAYS         = 7
 GUEST_PARENT_APPROVAL_NEEDED = False
 GUEST_SIMILARITY_THRESHOLD   = 0.75
+
+# === TTS / Audio (Phase 8.3 v2.5 - backend Piper, compatible Pi 5) ===
+TTS_ENABLED         = True
+TTS_PIPER_MODEL     = "models/piper/fr_FR-upmc-medium.onnx"
+TTS_ROBOT_FILTER    = True
+TTS_PITCH_SHIFT     = 4
+TTS_BANDPASS_LOW    = 300
+TTS_BANDPASS_HIGH   = 3500
+TTS_SATURATION      = 1.5
+TTS_VINTAGE_NOISE   = True
+TTS_NOISE_LEVEL     = 0.001

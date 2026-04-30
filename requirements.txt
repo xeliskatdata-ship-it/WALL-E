@@ -18,8 +18,9 @@ numpy>=1.26
 # pyaudio>=0.2
 # pyttsx3>=2.90
 # faster-whisper>=1.0
-# librosa>=0.10
-# scipy>=1.11
+librosa>=0.10
+scipy>=1.11
+piper-tts>=1.4
 # pygame>=2.5
 
 # Phase 8 : Brain (ACTIVE) - v2.0 OLLAMA

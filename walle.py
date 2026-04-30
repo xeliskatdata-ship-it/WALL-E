@@ -3,6 +3,7 @@
 # v2.0 : backend Ollama 100% offline + STT
 # v2.1 : pseudonymisation - default user lu dynamiquement
 # v2.3 : Phase 8.4 - lance VisionThread et branche face_q sur le brain
+# v2.4 : Phase 8.3 reste - lance AudioThread (TTS + filtre robot)
 
 import argparse
 import logging
@@ -15,7 +16,7 @@ load_dotenv()
 import config
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -25,14 +26,16 @@ from brain.agent import BrainThread
 from brain.identity import Identity, parse_prefix
 
 
-def print_welcome(current_user, stt_enabled, vision_enabled):
+def print_welcome(current_user, stt_enabled, vision_enabled, tts_enabled):
     print()
     print("=" * 60)
-    title = "  WALL-E reveille - v2.3 (Ollama offline, multi-user)"
+    title = "  WALL-E reveille - v2.4 (Ollama offline, multi-user)"
     if stt_enabled:
         title += " + STT"
     if vision_enabled:
         title += " + Vision"
+    if tts_enabled:
+        title += " + Voix"
     print(title)
     print(f"  Backend : {config.LLM_BACKEND} / {config.OLLAMA_MODEL}")
     print(f"  Host    : {config.OLLAMA_HOST}")
@@ -49,6 +52,8 @@ def print_welcome(current_user, stt_enabled, vision_enabled):
         print("  Micro actif : tu peux aussi parler (FR, pause ~1s pour valider)")
     if vision_enabled:
         print("  Camera active : WALL-E adapte son ton selon ton expression")
+    if tts_enabled:
+        print("  Voix active : WALL-E te repond en voix robot")
     print("=" * 60)
     print()
 
@@ -70,13 +75,17 @@ def keyboard_worker(user_in_q, stop_event):
 def main():
     default_user = getattr(config, "DEFAULT_USER", "parent_1")
 
-    parser = argparse.ArgumentParser(description="WALL-E v2.3 multi-user + STT + Vision")
+    parser = argparse.ArgumentParser(description="WALL-E v2.4 multi-user + STT + Vision + TTS")
     parser.add_argument("--user", type=str, default=default_user,
                         help=f"Locuteur par defaut (defaut : {default_user})")
     parser.add_argument("--no-stt", action="store_true",
                         help="Desactive le STT meme si config.STT_ENABLED=True")
     parser.add_argument("--no-vision", action="store_true",
                         help="Desactive la vision (camera + emotion)")
+    parser.add_argument("--no-tts", action="store_true",
+                        help="Desactive la voix (TTS + filtre robot)")
+    parser.add_argument("--no-robot-filter", action="store_true",
+                        help="Garde le TTS mais sans le filtre robot (voix Hortense brute)")
     args = parser.parse_args()
 
     current_identity = Identity.from_user_id(args.user)
@@ -88,7 +97,8 @@ def main():
     brain_in_q = Queue(maxsize=20)
     brain_out_q = Queue(maxsize=20)
     user_in_q = Queue(maxsize=20)
-    face_q = Queue(maxsize=20)                  # v2.3 Phase 8.4
+    face_q = Queue(maxsize=20)
+    audio_q = Queue(maxsize=20)
     stop_event = threading.Event()
 
     # === VisionThread (Phase 2 + Phase 8.4) ===
@@ -106,12 +116,28 @@ def main():
         except Exception as e:
             logger.error(f"VisionThread non demarre : {e}")
             vision_enabled = False
-            face_q = None  # Pas de face_q si pas de vision
+            face_q = None
 
     # === BrainThread ===
     brain = BrainThread(brain_in_q, brain_out_q, stop_event,
-                        face_q=face_q)         # v2.3 : passe face_q
+                        face_q=face_q)
     brain.start()
+
+    # === AudioThread (Phase 8.3 reste) ===
+    audio_thread = None
+    tts_enabled = getattr(config, "TTS_ENABLED", True) and not args.no_tts
+    if tts_enabled:
+        try:
+            from modules.audio import AudioThread
+            audio_thread = AudioThread(
+                audio_q=audio_q,
+                stop_event=stop_event,
+                robot_filter=not args.no_robot_filter,
+            )
+            audio_thread.start()
+        except Exception as e:
+            logger.error(f"AudioThread non demarre : {e}")
+            tts_enabled = False
 
     # === STT ===
     stt_thread = None
@@ -141,7 +167,7 @@ def main():
     )
     kb_thread.start()
 
-    print_welcome(current_identity, stt_enabled, vision_enabled)
+    print_welcome(current_identity, stt_enabled, vision_enabled, tts_enabled)
 
     try:
         while not stop_event.is_set():
@@ -185,7 +211,34 @@ def main():
 
             brain_in_q.put((current_identity.user_id, line))
             reply_uid, reply = brain_out_q.get()
+
+            # Affichage texte
             print(f"\nWALL-E > {reply}\n")
+
+            # Envoi TTS + attente fin de la lecture pour eviter l'echo
+            if tts_enabled and audio_thread:
+                try:
+                    audio_q.put_nowait(reply)
+                except Exception as e:
+                    logger.warning("Audio queue pleine : %s", e)
+
+                # Attendre que WALL-E ait fini de parler (anti-echo)
+                import time
+                time.sleep(0.5)
+                while audio_thread.speaking_event.is_set() and not stop_event.is_set():
+                    time.sleep(0.1)
+
+                # Drainage de la queue STT : on jette tout ce qui a ete capte
+                # pendant que WALL-E parlait (echo de sa propre voix)
+                drained = 0
+                while True:
+                    try:
+                        user_in_q.get_nowait()
+                        drained += 1
+                    except Empty:
+                        break
+                if drained > 0:
+                    logger.info("Anti-echo : %d entree(s) STT droppee(s)", drained)
 
     except KeyboardInterrupt:
         print("\n[Ctrl+C]")
@@ -197,6 +250,8 @@ def main():
         stt_thread.join(timeout=3)
     if vision_thread:
         vision_thread.join(timeout=3)
+    if audio_thread:
+        audio_thread.join(timeout=3)
     print("A bientot !")
 
 
