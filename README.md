@@ -29,17 +29,17 @@ WALL-E est construit en plusieurs phases successives :
 
 | Phase | Module | Statut |
 |-------|--------|--------|
-| 2 | Vision (détection visage + émotion) | Fonctionnel |
-| 3 | Moteurs servos (6 axes via Arduino) | Fonctionnel |
-| 5 | Émotions (heuristiques FaceMesh) | Fonctionnel |
-| 8.1 | Brain text-only multi-user | Livré |
-| **8.5** | **Migration full Ollama (offline)** | **Livré v2.0** |
-| 8.6 | Couche safety déterministe | À venir |
+| 2 | Vision (détection visage + émotion) | ✅ Fonctionnel |
+| 3 | Moteurs servos (6 axes via Arduino) | ✅ Fonctionnel |
+| 5 | Émotions (heuristiques FaceMesh) | ✅ Fonctionnel |
+| 8.1 | Brain text-only multi-user | ✅ Livré |
+| **8.5** | **Migration full Ollama (offline)** | ✅ **Livré v2.0** |
+| **8.6** | **Couche safety déterministe** | ✅ **Livré v2.2** |
+| **8.4** | **Émotion injectée dans le prompt** | ✅ **Livré v2.3** |
 | 8.2 | Outils moteurs (move_head, macros) | À venir |
 | 8.3 | Audio (STT + TTS + VAD) | Partiel (STT en place) |
 | 8.7 | Autonomie (wake word + initiative) | À venir |
 | 8.8 | Accueil invités (Resemblyzer) | À venir |
-| 8.4 | Émotion injectée dans le prompt | À venir |
 | 9 | Mobilité (Mecanum) + corps Pi 5 | À venir |
 | 10 | Application mobile (parents) | À venir |
 
@@ -63,17 +63,18 @@ WALL-E est construit en plusieurs phases successives :
 Pattern **thread-based avec queues** pour la communication inter-modules. Chaque module tourne dans son propre thread daemon et communique via des objets `queue.Queue` thread-safe.
 
 ```
-┌─────────────┐    brain_in_q    ┌──────────────┐
+┌─────────────┐    user_in_q     ┌──────────────┐
 │  Clavier /  ├─────────────────▶│              │
 │  STT / Voice│                  │ BrainThread  │
 └─────────────┘                  │              │
                                  │ Ollama local │
 ┌─────────────┐    face_q        │  ChromaDB    │
 │VisionThread ├─────────────────▶│  Tool use    │
-└─────────────┘                  │  Safety      │
+│ (émotion)   │                  │  Safety      │
+└─────────────┘                  │  Émotion ctx │
                                  └──────┬───────┘
                                         │
-                                        ▼ hardware_q
+                                        ▼ hardware_q (à venir)
                                  ┌──────────────┐
                                  │ MotorsThread │
                                  │MobilityThread│
@@ -81,10 +82,12 @@ Pattern **thread-based avec queues** pour la communication inter-modules. Chaque
                                  └──────────────┘
 ```
 
-### Backend IA (v2.0 — full offline)
+### Backend IA (v2.3 — full offline)
 
-- **LLM** : [Ollama](https://ollama.com) avec `qwen2.5:3b` (Pi 5) ou `qwen2.5:7b` (machine de dev). 100% local, coût d'usage zéro.
+- **LLM** : [Ollama](https://ollama.com) avec `qwen2.5:3b` (Pi 5 ou dev), ou `qwen2.5:7b` pour plus de qualité. 100% local, coût d'usage zéro.
 - **Mémoire long terme** : ChromaDB local (vector DB) avec embeddings `all-MiniLM-L6-v2`
+- **Vision** : MediaPipe FaceMesh (468 landmarks) + heuristiques calibrées pour détection d'émotions (happy / sad / pain / neutral)
+- **Safety** : couche déterministe (`brain/safety.py`) avec pattern matching sur input et output
 - **Voice ID** (Phase 8.8) : Resemblyzer pour identifier les utilisateurs + accueillir les invités à la volée
 - **Wake word** (Phase 8.7) : openWakeWord, phrase « Coucou WALL-E »
 
@@ -110,16 +113,34 @@ L'abstraction LLM est dans `brain/llm_client.py` avec une interface compatible A
   - Intimité préservée entre les parents (pas d'accès mutuel aux mémoires perso)
   - Enfants informés de cette transparence via leur prompt système
 
+### Émotion injectée dans le prompt (v2.3)
+
+À chaque tour de conversation, `BrainThread` lit la dernière `FaceData` détectée par `VisionThread` et injecte une consigne de ton dans le system prompt :
+
+| Émotion détectée | Effet sur le ton de WALL-E |
+|---|---|
+| `happy` (sourire) | Ton enjoué, complice, taquin |
+| `sad` (tristesse) | Ton plus doux, chaleureux, pas de blagues |
+| `pain` (douleur) | Ton concerné, demande gentille |
+| `neutral` ou rien | Comportement nominal |
+
+L'émotion est lissée temporellement sur 5 frames pour éviter les sauts. Les seuils de détection sont calibrés sur des données réelles via le script `calibrate_emotion.py`.
+
 ### Garde-fous non-négociables pour les mineurs
 
-Intégrés en dur dans les overlays persona des enfants, et renforcés en Phase 8.6 par une couche `safety.py` déterministe :
+Doublement protégés :
 
-1. **Détresse émotionnelle** → validation en une phrase + redirection vers les parents
-2. **Sujets lourds** (harcèlement, abus, idées noires) → sortie immédiate du jeu, redirection ferme
-3. **Contenu inadapté à l'âge** → déclinaison polie + redirection parents
-4. **Jamais de secret imposé par un tiers** → refus absolu
+1. **Côté LLM** : règles intégrées dans les overlays persona des enfants (`brain/prompts.py`, sections `MINOR_TRANSPARENCY` et `MINOR_SAFEGUARDS`)
+2. **Côté safety déterministe** (`brain/safety.py`, Phase 8.6) :
+   - **Niveau 2** : détection de détresse sur l'INPUT user (idées noires, violence subie, harcèlement, automutilation) → redirection immédiate, sans appel au LLM
+   - **Niveau 1** : pattern matching sur la SORTIE LLM pour les mineurs (sexualité explicite, violence graphique, drogues, méthodes d'automutilation) → remplacement par message safe + log d'alerte
 
-Ces règles s'appliquent aux enfants connus **et** aux invités mineurs.
+Messages de redirection adaptés au rôle :
+- Mineur → « parle à tes parents »
+- Adulte → numéros nationaux (3114 prévention suicide, 3919 violences)
+- Invité → 119 enfance en danger / 3114
+
+77 tests unitaires valident le corpus (24 phrases de détresse, 25 phrases neutres, 16 sorties problématiques, 12 sorties OK).
 
 ### Outils exposés à l'agent
 
@@ -134,12 +155,13 @@ Note : `web_search` a été retiré en v2.0 (mode 100% offline).
 
 ### Persona WALL-E
 
-- **Curieux** : pose une question de relance 2 fois sur 3
-- **Indiscret avec tact** : rebondit sur sa mémoire long terme
+- **Curieux et taquin** : pose une question de relance ~1 fois sur 3
+- **Complice avec tact** : commente avec personnalité (« moi j'aime bien », « ah tiens »)
 - **Un peu seul mais content** : accueil chaleureux, jamais de reproche
 - **Rêve d'Eve** : évocation rare (1/10 réponses max), mode espoir
 - **Tic vocal** : répétition d'un mot-clé passionnant
-- **Longueur adaptative** : 2-3 phrases par défaut, développe sur demande explicite
+- **Adaptation émotionnelle** : ton enjoué si tu souris, plus doux si tu sembles triste
+- **Longueur adaptative** : 1-2 phrases par défaut, développe sur demande explicite
 
 ---
 
@@ -151,23 +173,30 @@ WALL-E/
 │   └── walle_servo.ino           # Firmware servos + ultrason
 ├── modules/
 │   ├── motors.py                 # MotorsThread, protocole série
-│   ├── vision.py                 # VisionThread, FaceMesh + émotions
+│   ├── vision.py                 # VisionThread, FaceMesh + émotions calibrées
 │   └── stt.py                    # STT Windows
 ├── brain/
 │   ├── __init__.py
 │   ├── llm_client.py             # Wrapper Ollama compat Anthropic SDK
 │   ├── identity.py               # Identités + ACL
 │   ├── memory.py                 # MemoryManager multi-collection
-│   ├── prompts.py                # BASE_PERSONA + structure overlays
+│   ├── prompts.py                # BASE_PERSONA + EMOTION_TONE + structure overlays
 │   ├── personas_local_example.py # Template overlays (à dupliquer)
 │   ├── personas_local.py         # PRIVÉ (gitignore) - tes vraies personas
 │   ├── tools.py                  # Outils + dispatcher ACL
-│   └── agent.py                  # BrainThread + boucle tool_use
+│   ├── safety.py                 # Couche safety déterministe (Phase 8.6)
+│   └── agent.py                  # BrainThread + boucle tool_use + émotion + safety
 ├── tests/
-├── data/chroma/                   # Vector DB (gitignore)
-├── config.py                      # Config centrale
+│   ├── test_brain.py             # Imports, identité, ACL, mémoire
+│   ├── test_safety.py            # 77 tests safety
+│   └── test_emotion_prompt.py    # 8 tests injection émotion
+├── data/
+│   ├── chroma/                   # Vector DB (gitignore)
+│   └── safety_alerts.log         # Logs alertes safety (gitignore)
+├── config.py                      # Config centrale + seuils émotion
 ├── family_local_example.py        # Template users (à dupliquer)
 ├── family_local.py                # PRIVÉ (gitignore) - tes vrais users
+├── calibrate_emotion.py           # Script de calibration vision
 ├── walle.py                       # Orchestrateur
 ├── requirements.txt
 ├── .env.example
@@ -179,6 +208,12 @@ WALL-E/
 
 ## Installation rapide
 
+### Prérequis
+
+- **Python 3.11** (recommandé). Python 3.12 OK aussi. **Python 3.14 non supporté** car certains paquets audio (pyaudio) n'ont pas encore de wheel précompilé.
+
+### Étapes
+
 ```bash
 # 1. Cloner et se placer dans le projet
 git clone https://github.com/<your-user>/WALL-E.git
@@ -189,10 +224,11 @@ cd WALL-E
 # Linux  : curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen2.5:3b
 
-# 3. Environnement Python
-python -m venv .venv
-source .venv/Scripts/activate      # Git Bash sur Windows
-# ou source .venv/bin/activate     # Linux / Pi
+# 3. Environnement Python 3.11
+py -3.11 -m venv .venv311              # Windows (avec le launcher py)
+# ou python3.11 -m venv .venv311       # Linux / Pi
+source .venv311/Scripts/activate       # Git Bash sur Windows
+# ou source .venv311/bin/activate      # Linux / Pi
 
 # 4. Dépendances
 pip install -r requirements.txt
@@ -239,12 +275,24 @@ git check-ignore family_local.py brain/personas_local.py
 # Doit lister les deux fichiers (= ignorés, OK)
 ```
 
-### 4. Lancer WALL-E
+### 4. (Optionnel) Calibrer la détection d'émotion sur ton visage
+
+Les seuils de détection émotionnelle sont calibrés pour un visage type. Si tu veux les ajuster à ton visage spécifique :
 
 ```bash
-python walle.py                         # default user depuis family_local.py
-python walle.py --user alice            # user spécifique
-python walle.py --user charlie --no-stt # désactiver le micro
+python calibrate_emotion.py
+```
+
+Le script demande de mimer 5 émotions pendant 15 secondes face à la caméra et affiche les valeurs médianes. Compare-les aux seuils dans `config.py` et ajuste si nécessaire.
+
+### 5. Lancer WALL-E
+
+```bash
+python walle.py                              # default user, vision + STT actifs
+python walle.py --user alice                 # user spécifique
+python walle.py --user charlie --no-stt      # désactiver le micro
+python walle.py --no-vision                  # désactiver la caméra
+python walle.py --no-stt --no-vision         # mode texte pur
 ```
 
 ---
@@ -272,11 +320,14 @@ python tests/test_brain.py --dry-run
 # Conversation réelle (requiert Ollama service actif)
 python tests/test_brain.py --text
 
-# Modules
-python tests/test_motors.py --dry-run
-python tests/test_vision.py --dry-run
-python tests/test_mic.py
-python tests/test_stt_thread.py
+# Couche safety (77 tests)
+python tests/test_safety.py
+
+# Injection émotion dans prompt (8 tests, mock FaceData)
+python tests/test_emotion_prompt.py
+
+# Calibration vision (test live, 15 secondes face caméra)
+python calibrate_emotion.py
 ```
 
 ---
@@ -298,9 +349,9 @@ Validation systématique dans `brain/tools.py` → `execute_tool()`. Double déf
 1. Filtrage côté LLM : les outils non autorisés ne sont pas exposés dans le system prompt
 2. Filtrage côté serveur : toute tentative d'appel est vérifiée avant exécution
 
-### Garde-fous mineurs
+### Garde-fous mineurs (Phase 8.6)
 
-Règles intégrées dans les overlays persona (`brain/prompts.py`, sections `MINOR_TRANSPARENCY` et `MINOR_SAFEGUARDS`) et renforcées par `brain/safety.py` (Phase 8.6) qui filtre la sortie LLM en post-traitement.
+`brain/safety.py` filtre la sortie LLM en post-traitement et l'input user en pré-traitement. Voir section [Garde-fous non-négociables pour les mineurs](#garde-fous-non-négociables-pour-les-mineurs).
 
 ### Vie privée et offline
 
@@ -315,7 +366,7 @@ Le repo public ne contient **aucune information identifiante** : ni prénoms ré
 
 - `family_local.py` (gitignore)
 - `brain/personas_local.py` (gitignore)
-- `data/` (gitignore — contient ChromaDB)
+- `data/` (gitignore — contient ChromaDB et logs safety)
 - `.env` (gitignore — secrets éventuels)
 
 Quiconque clone ce repo doit créer ses propres versions de ces fichiers depuis les templates `*_example.py`.
@@ -324,21 +375,17 @@ Quiconque clone ce repo doit créer ses propres versions de ces fichiers depuis 
 
 ## Feuille de route
 
-### Phase 8.6 — Couche safety déterministe
-
-- Création de `brain/safety.py` avec 3 niveaux de filtrage (pattern matching, détection détresse, contradiction prompt)
-- Compense la moindre fiabilité des modèles locaux pour les garde-fous mineurs
-
-### Phase 8.2 — Outils moteurs
+### Phase 8.2 — Outils moteurs (prochaine)
 
 - `move_head(pan, tilt)` et `wall_e_macro(name)` dans `brain/tools.py`
 - Lancement de `MotorsThread` dans `walle.py`
 - WALL-E bouge sur commande conversationnelle (réservé parents)
 
-### Phase 8.3 — Audio TTS + VAD
+### Phase 8.3 — Audio TTS + VAD complet
 
 - TTS : `pyttsx3` + pipeline effet robot (librosa pitch shift + scipy bandpass)
 - VAD continu : `webrtcvad`
+- WALL-E répond en vraie voix robot vintage
 
 ### Phase 8.7 — Autonomie
 
@@ -352,11 +399,6 @@ Quiconque clone ce repo doit créer ses propres versions de ces fichiers depuis 
 - Enrôlement à la volée avec consentement vocal
 - Persona child + safeguards complets si invité mineur
 - Auto-purge mémoire à J+7 (J+90 si validé par un parent)
-
-### Phase 8.4 — Émotion dans le prompt
-
-- Lecture de `face_q` à chaque tour
-- Injection de l'émotion détectée dans le system prompt
 
 ### Phase 9 — Mobilité + corps Pi 5
 
@@ -377,7 +419,7 @@ Quiconque clone ce repo doit créer ses propres versions de ces fichiers depuis 
 
 | Document | Contenu |
 |----------|---------|
-| `CDC_WALL-E_v2.1.docx` | Cahier des charges complet |
+| `CDC_WALL-E_v2.3.docx` | Cahier des charges complet (v2.3 — Phase 8.4 livrée) |
 | `MIGRATION_v2.0.md` | Guide step-by-step migration Anthropic → Ollama |
 | `README.md` | Ce document |
 
@@ -385,7 +427,7 @@ Quiconque clone ce repo doit créer ses propres versions de ces fichiers depuis 
 
 ## Stack technique
 
-Python, **Ollama** (qwen2.5:3b), ChromaDB, Mediapipe, OpenCV, pyserial, FastAPI (Phase 10), React Native (Phase 10).
+Python 3.11, **Ollama** (qwen2.5:3b), ChromaDB, MediaPipe, OpenCV, pyserial, pyaudio, SpeechRecognition, FastAPI (Phase 10), React Native (Phase 10).
 
 Inspiration : WALL-E (Pixar, 2008).
 
