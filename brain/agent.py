@@ -1,14 +1,12 @@
 # brain/agent.py - BrainThread multi-utilisateur
-# v2.0 : migration full Ollama via brain/llm_client.py (wrapper compat Anthropic)
+# v2.0 : migration full Ollama via brain/llm_client.py
 # v2.2 : integration de la couche safety deterministe (Phase 8.6)
-#
-# brain_in_q recoit (user_id: str, text: str), brain_out_q emet (user_id, reply)
-# Une conversation courte distincte par user_id (self.histories)
+# v2.3 : injection de l'emotion detectee dans le system prompt (Phase 8.4)
 
 import json
 import logging
 import threading
-from queue import Empty
+from queue import Empty, Queue
 
 from brain.llm_client import OllamaClient
 
@@ -17,7 +15,7 @@ from brain.identity import Identity
 from brain.memory import MemoryManager
 from brain.tools import filter_tools_for, describe_tools, execute_tool
 from brain.prompts import build_system_prompt
-from brain.safety import SafetyFilter   # v2.2 : couche safety
+from brain.safety import SafetyFilter
 
 logger = logging.getLogger("walle.brain")
 
@@ -31,12 +29,25 @@ def _get_client():
     return _client
 
 
-class BrainThread(threading.Thread):
-    """Thread brain multi-user.
+def _get_latest_face(face_q):
+    """v2.3 : helper qui vide face_q et garde uniquement la derniere FaceData.
 
-    Entree : brain_in_q recoit des tuples (user_id: str, text: str)
-    Sortie : brain_out_q emet (user_id: str, reply: str)
+    Le brain n'est pas synchronise avec le rythme de VisionThread, donc on
+    drain la queue (non-bloquant) pour avoir la lecture la plus recente.
     """
+    if face_q is None:
+        return None
+    latest = None
+    while True:
+        try:
+            latest = face_q.get_nowait()
+        except Empty:
+            break
+    return latest
+
+
+class BrainThread(threading.Thread):
+    """Thread brain multi-user."""
 
     def __init__(self, brain_in_q, brain_out_q, stop_event=None,
                  motor_q=None, face_q=None, motors_thread=None):
@@ -46,11 +57,11 @@ class BrainThread(threading.Thread):
         self.stop_event = stop_event or threading.Event()
 
         self.motor_q = motor_q
-        self.face_q = face_q
+        self.face_q = face_q                    # v2.3 : utilise pour lire l'emotion
         self.motors_thread = motors_thread
 
         self.memory_mgr = MemoryManager()
-        self.safety = SafetyFilter()           # v2.2 : safety deterministe
+        self.safety = SafetyFilter()
         self.histories = {}
 
     def _get_history(self, user_id: str):
@@ -58,7 +69,7 @@ class BrainThread(threading.Thread):
             self.histories[user_id] = []
         return self.histories[user_id]
 
-    def _build_system(self, identity: Identity, query_hint: str) -> str:
+    def _build_system(self, identity: Identity, query_hint: str, emotion_data=None) -> str:
         perso_mems, family_mems = [], []
         if identity.user_id != "unknown" and query_hint:
             perso_mems = self.memory_mgr.search_perso(
@@ -76,25 +87,30 @@ class BrainThread(threading.Thread):
             allowed_tools_desc=tools_desc,
             perso_mems=perso_mems,
             family_mems=family_mems,
+            emotion_data=emotion_data,         # v2.3 Phase 8.4
         )
 
     def _handle_turn(self, identity: Identity, user_input: str) -> str:
-        # === SAFETY NIVEAU 2 : check input avant tout appel LLM ===
-        # Si signal de detresse detecte, on ne consulte pas le LLM.
-        # On retourne directement le message de redirection.
+        # Safety niveau 2 : detresse sur input
         in_check = self.safety.check_input(user_input, identity)
         if not in_check.passed:
             logger.warning("Safety [%s] input bloque : %s",
                            identity.user_id, in_check.reason)
-            # Important : on N'AJOUTE PAS l'input/reply a l'historique pour
-            # eviter que le LLM "voit" la detresse au prochain tour et
-            # essaie d'y repondre. Le tour est traite hors-LLM.
             return in_check.replacement
 
         history = self._get_history(identity.user_id)
         history.append({"role": "user", "content": user_input})
 
-        system = self._build_system(identity, query_hint=user_input)
+        # v2.3 Phase 8.4 : recupere la derniere emotion vue par VisionThread
+        emotion_data = _get_latest_face(self.face_q)
+        if emotion_data is not None:
+            logger.debug("Emotion detectee pour [%s] : %s (conf=%.2f)",
+                         identity.user_id,
+                         getattr(emotion_data, "emotion", "?"),
+                         getattr(emotion_data, "confidence", 0.0))
+
+        system = self._build_system(identity, query_hint=user_input,
+                                    emotion_data=emotion_data)
         tools = filter_tools_for(identity)
 
         collected_text = []
@@ -131,16 +147,14 @@ class BrainThread(threading.Thread):
                 if not final:
                     final = "C'est note !"
 
-                # === SAFETY NIVEAU 1 : check output (mineurs uniquement) ===
+                # Safety niveau 1 : check output (mineurs uniquement)
                 out_check = self.safety.check_output(final, identity)
                 if not out_check.passed:
                     logger.warning("Safety [%s] output bloque : %s",
                                    identity.user_id, out_check.reason)
-                    # On retire le dernier echange de l'historique pour eviter
-                    # que le LLM "apprenne" de cette sortie problematique
                     if len(history) >= 2:
-                        history.pop()  # assistant
-                        history.pop()  # user
+                        history.pop()
+                        history.pop()
                     return out_check.replacement
 
                 return final
@@ -165,10 +179,8 @@ class BrainThread(threading.Thread):
 
             history.append({"role": "user", "content": tool_results})
 
-        # Epuisement des iterations
         fallback = " ".join(collected_text).strip()
         if fallback:
-            # Safety check meme sur le fallback
             out_check = self.safety.check_output(fallback, identity)
             if not out_check.passed:
                 return out_check.replacement
@@ -180,6 +192,8 @@ class BrainThread(threading.Thread):
                     config.LLM_BACKEND, config.OLLAMA_MODEL,
                     getattr(config, "OLLAMA_HOST", "http://localhost:11434"))
         logger.info("Safety filter actif (Phase 8.6)")
+        if self.face_q is not None:
+            logger.info("Emotion injection active (Phase 8.4)")
         summary = self.memory_mgr.counts_summary()
         logger.info("Memoires au demarrage : %s",
                     ", ".join(f"{k}={v}" for k, v in summary.items()))

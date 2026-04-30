@@ -1,5 +1,7 @@
 # modules/vision.py — Thread caméra : détection visage + émotion
 # Utilise Mediapipe FaceMesh (468 landmarks) + heuristiques géométriques.
+# v2 (Phase 8.4 fix) : refactor _compute_smile_score + _compute_brow_distance + _detect_emotion
+# avec seuils calibres sur des donnees reelles webcam.
 
 import time
 import threading
@@ -20,47 +22,43 @@ logger = logging.getLogger("walle.vision")
 # ---------------------------------------------------------------
 @dataclass
 class FaceData:
-    """Résultat d'une frame analysée, poussé dans face_q."""
-    x: int              # Bounding box coin haut-gauche
-    y: int
-    w: int
-    h: int
-    cx: float           # Centre du visage normalisé [-1, +1]
-    cy: float
+    """Une frame de detection visage + emotion lissee."""
+    detected: bool
     emotion: str        # "neutral", "happy", "sad", "pain"
     confidence: float   # Confiance détection visage (0–1)
-    timestamp: float = field(default_factory=time.time)
+    bbox: tuple = None  # (x, y, w, h) ou None
+    debug: dict = field(default_factory=dict)  # v2 : valeurs intermediaires pour debug
 
 
 # ---------------------------------------------------------------
-# Indices FaceMesh pour les heuristiques émotionnelles
-# Réf : https://github.com/google-ai-edge/mediapipe/blob/master
-#        /mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
+# Indices landmarks FaceMesh (468 points)
 # ---------------------------------------------------------------
+# Bouche
+_MOUTH_TOP      = 13     # Haut de la levre superieure
+_MOUTH_BOTTOM   = 14
+_MOUTH_LEFT     = 78
+_MOUTH_RIGHT    = 308
+_MOUTH_CORNER_L = 61
+_MOUTH_CORNER_R = 291
 
-# Bouche — pour MAR (Mouth Aspect Ratio)
-_MOUTH_TOP     = 13    # Lèvre supérieure centre
-_MOUTH_BOTTOM  = 14    # Lèvre inférieure centre
-_MOUTH_LEFT    = 308   # Coin gauche
-_MOUTH_RIGHT   = 78    # Coin droit
-# Points supplémentaires pour détecter le sourire
-_MOUTH_CORNER_L = 61   # Commissure gauche haute
-_MOUTH_CORNER_R = 291  # Commissure droite haute
-
-# Yeux — pour EAR (Eye Aspect Ratio)
-_EYE_L_TOP     = 159
-_EYE_L_BOTTOM  = 145
-_EYE_L_LEFT    = 33
-_EYE_L_RIGHT   = 133
-_EYE_R_TOP     = 386
-_EYE_R_BOTTOM  = 374
-_EYE_R_LEFT    = 362
-_EYE_R_RIGHT   = 263
+# Yeux
+_EYE_L_TOP    = 159
+_EYE_L_BOTTOM = 145
+_EYE_L_LEFT   = 33
+_EYE_L_RIGHT  = 133
+_EYE_R_TOP    = 386
+_EYE_R_BOTTOM = 374
+_EYE_R_LEFT   = 362
+_EYE_R_RIGHT  = 263
 
 # Sourcils — distance verticale pour tristesse
 _BROW_L_INNER  = 70
 _BROW_R_INNER  = 300
 _NOSE_TIP      = 4     # Référence stable pour normalisation
+
+# v2 : reference pour normaliser les distances par taille du visage
+_FACE_LEFT  = 234   # Tempe gauche
+_FACE_RIGHT = 454   # Tempe droite
 
 
 # ---------------------------------------------------------------
@@ -69,6 +67,11 @@ _NOSE_TIP      = 4     # Référence stable pour normalisation
 def _dist(p1, p2):
     """Distance euclidienne 2D entre deux landmarks."""
     return np.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
+
+
+def _face_width(landmarks):
+    """v2 : largeur du visage pour normalisation. Stable peu importe la distance camera."""
+    return _dist(landmarks[_FACE_LEFT], landmarks[_FACE_RIGHT])
 
 
 def _compute_mar(landmarks):
@@ -86,15 +89,30 @@ def _compute_mar(landmarks):
 
 
 def _compute_smile_score(landmarks):
-    """Score de sourire basé sur l'élévation des coins de la bouche
-    par rapport au centre de la lèvre supérieure.
-    Positif = sourire, négatif = moue."""
+    """v2 : score de sourire normalise par la largeur du visage.
+
+    Logique : on mesure la position verticale moyenne des coins de la bouche
+    par rapport au centre de la levre superieure, normalisee par la taille du visage.
+
+    Plus le retour est proche de 0 ou positif, plus c'est un sourire.
+    Plus c'est negatif, plus c'est neutre/moue.
+
+    Note : la valeur absolue varie selon la geometrie du visage. Le calibrage
+    se fait via des seuils relatifs (cf. config.SMILE_HAPPY_THRESHOLD).
+    """
     top_center = landmarks[_MOUTH_TOP]
     corner_l   = landmarks[_MOUTH_CORNER_L]
     corner_r   = landmarks[_MOUTH_CORNER_R]
-    # Les coins sont-ils plus hauts que le centre ? (y inversé en image)
     avg_corner_y = (corner_l.y + corner_r.y) / 2
-    return top_center.y - avg_corner_y  # positif = sourire
+
+    # En image, axe Y vers le bas : sourire = coins plus hauts = corner.y < top.y
+    raw = top_center.y - avg_corner_y
+
+    # v2 : normalisation par largeur du visage
+    fw = _face_width(landmarks)
+    if fw < 1e-6:
+        return 0.0
+    return raw / fw
 
 
 def _compute_ear(landmarks):
@@ -104,111 +122,131 @@ def _compute_ear(landmarks):
         v = _dist(landmarks[top], landmarks[bottom])
         h = _dist(landmarks[left], landmarks[right])
         return v / h if h > 1e-6 else 0.0
-
     ear_l = _ear_one(_EYE_L_TOP, _EYE_L_BOTTOM, _EYE_L_LEFT, _EYE_L_RIGHT)
     ear_r = _ear_one(_EYE_R_TOP, _EYE_R_BOTTOM, _EYE_R_LEFT, _EYE_R_RIGHT)
     return (ear_l + ear_r) / 2
 
 
-def _compute_brow_distance(landmarks):
-    """Distance normalisée entre les sourcils intérieurs.
-    Faible = sourcils froncés (tristesse / douleur).
-    Normalisé par la distance nez-sourcil pour être indépendant de la distance caméra."""
+def _compute_brow_squeeze(landmarks):
+    """v2 : ressere des sourcils, normalise par la largeur du visage.
+
+    Faible = sourcils rapproches (frons, fronceemnt = tristesse / douleur).
+    Eleve = sourcils ecartes (etat normal).
+    """
+    brow_l = landmarks[_BROW_L_INNER]
+    brow_r = landmarks[_BROW_R_INNER]
+    fw = _face_width(landmarks)
+    if fw < 1e-6:
+        return 0.0
+    # On mesure l'ecartement horizontal des sourcils internes, normalise.
+    return _dist(brow_l, brow_r) / fw
+
+
+def _compute_brow_drop(landmarks):
+    """v2 : descente des sourcils par rapport au nez, normalisee par largeur visage.
+
+    Faible = sourcils proches du nez (sourcils baisses, frons).
+    Eleve = sourcils releves.
+    """
     brow_l = landmarks[_BROW_L_INNER]
     brow_r = landmarks[_BROW_R_INNER]
     nose   = landmarks[_NOSE_TIP]
-    brow_dist = _dist(brow_l, brow_r)
-    # Normalisation par la distance verticale nez → milieu sourcils
     brow_mid_y = (brow_l.y + brow_r.y) / 2
-    ref_dist = abs(nose.y - brow_mid_y)
-    if ref_dist < 1e-6:
+    fw = _face_width(landmarks)
+    if fw < 1e-6:
         return 0.0
-    return brow_dist / ref_dist
+    # Distance verticale brow -> nose, normalisee
+    return abs(nose.y - brow_mid_y) / fw
 
 
 # ---------------------------------------------------------------
 # Détection émotion combinée
 # ---------------------------------------------------------------
 def _detect_emotion(landmarks):
-    """Analyse les landmarks FaceMesh et retourne (emotion, score).
-    Logique à seuils, pas de ML — tourne sur Pi sans GPU."""
+    """v2.1 : analyse les landmarks FaceMesh et retourne (emotion, score, debug_dict).
 
-    mar   = _compute_mar(landmarks)
-    smile = _compute_smile_score(landmarks)
-    ear   = _compute_ear(landmarks)
-    brow  = _compute_brow_distance(landmarks)
+    Logique calibree sur des donnees reelles webcam :
+    - HAPPY : MAR ouvert + EAR plus faible (sourire dents + yeux plisses du rire)
+    - PAIN  : MAR ouvert + sourcils tres baisses (grimace de douleur)
+    - SAD   : MAR ferme + smile tres negatif + sourcils baisses
+    """
+    mar    = _compute_mar(landmarks)
+    smile  = _compute_smile_score(landmarks)
+    ear    = _compute_ear(landmarks)
+    brow_s = _compute_brow_squeeze(landmarks)
+    brow_d = _compute_brow_drop(landmarks)
+
+    debug = {
+        "mar": round(mar, 3),
+        "smile": round(smile, 4),
+        "ear": round(ear, 3),
+        "brow_squeeze": round(brow_s, 4),
+        "brow_drop": round(brow_d, 4),
+    }
 
     scores = {
         "happy":   0.0,
         "sad":     0.0,
         "pain":    0.0,
-        "neutral": 0.3,  # Biais léger vers neutre
+        "neutral": 0.3,  # Biais leger vers neutre
     }
 
-    # Joie : bouche ouverte + coins relevés
-    if mar > config.MAR_HAPPY_THRESHOLD and smile > 0.005:
-        scores["happy"] = min(1.0, mar * 1.2 + smile * 10)
+    bouche_ouverte = mar > config.MAR_OPEN_THRESHOLD
 
-    # Douleur : yeux très plissés + sourcils froncés
-    if ear < config.EAR_PAIN_THRESHOLD:
-        scores["pain"] = min(1.0, (config.EAR_PAIN_THRESHOLD - ear) * 8)
-        if brow < config.BROW_SAD_THRESHOLD:
-            scores["pain"] += 0.2
+    # === HAPPY === bouche ouverte + yeux plisses du rire (ear bas)
+    if bouche_ouverte and ear < config.EAR_HAPPY_MAX:
+        # Plus l'ear est bas, plus le score est haut
+        intensity = (config.EAR_HAPPY_MAX - ear) * 4
+        scores["happy"] = min(1.0, 0.5 + intensity)
 
-    # Tristesse : coins bouche abaissés + sourcils rapprochés
-    if smile < -0.003 and brow < config.BROW_SAD_THRESHOLD * 1.2:
-        scores["sad"] = min(1.0, abs(smile) * 15 + (config.BROW_SAD_THRESHOLD - brow) * 5)
+    # === PAIN === bouche ouverte (grimace) + sourcils tres descendus
+    if bouche_ouverte and brow_d > config.BROW_DROP_PAIN_THRESHOLD:
+        intensity = (brow_d - config.BROW_DROP_PAIN_THRESHOLD) * 5
+        scores["pain"] = min(1.0, 0.5 + intensity)
 
-    # Émotion dominante
+    # === SAD === bouche fermee + coins tres tombants + sourcils descendus
+    if (not bouche_ouverte
+            and smile < config.SMILE_SAD_THRESHOLD
+            and brow_d > config.BROW_DROP_SAD_THRESHOLD):
+        intensity = (config.SMILE_SAD_THRESHOLD - smile) * 10
+        intensity += (brow_d - config.BROW_DROP_SAD_THRESHOLD) * 5
+        scores["sad"] = min(1.0, 0.4 + intensity)
+
+    # === ARBITRAGE ===
     emotion = max(scores, key=scores.get)
-    score   = scores[emotion]
+    score = scores[emotion]
 
-    # Si le score max est trop faible, c'est neutre
     if score < config.EMOTION_MIN_SCORE:
         emotion = "neutral"
-        score   = scores["neutral"]
+        score = scores["neutral"]
 
-    return emotion, round(score, 2)
+    return emotion, round(score, 2), debug
 
 
 # ---------------------------------------------------------------
 # Lissage temporel des émotions (moyenne glissante)
 # ---------------------------------------------------------------
 class EmotionSmoother:
-    """Évite les changements d'expression intempestifs en lissant
-    sur N frames consécutives."""
-
+    """Lissage par moyenne glissante : evite les sauts d'emotion frame par frame."""
     def __init__(self, window_size=5):
         self._history = deque(maxlen=window_size)
-        self._current = "neutral"
+        self._counts = {"neutral": 0, "happy": 0, "sad": 0, "pain": 0}
 
     def update(self, emotion):
         self._history.append(emotion)
-        if len(self._history) < self._history.maxlen:
-            return self._current
-
-        # L'émotion la plus fréquente sur la fenêtre
-        from collections import Counter
-        counts = Counter(self._history)
-        dominant, count = counts.most_common(1)[0]
-
-        # Seuil de majorité : l'émotion doit apparaître > 60% de la fenêtre
-        if count >= self._history.maxlen * 0.6:
-            self._current = dominant
-
-        return self._current
-
-    def reset(self):
-        self._history.clear()
-        self._current = "neutral"
+        # Reconstruction des counts a partir de l'historique courant
+        self._counts = {"neutral": 0, "happy": 0, "sad": 0, "pain": 0}
+        for e in self._history:
+            self._counts[e] = self._counts.get(e, 0) + 1
+        # Emotion dominante = celle qui apparait le plus souvent
+        return max(self._counts, key=self._counts.get)
 
 
 # ---------------------------------------------------------------
-# Thread principal Vision
+# Thread vision
 # ---------------------------------------------------------------
 class VisionThread(threading.Thread):
     """Thread caméra : capture → FaceMesh → émotion → face_q."""
-
     def __init__(self, face_q, stop_event=None):
         super().__init__(name="VisionThread", daemon=True)
         self.face_q = face_q
@@ -220,13 +258,7 @@ class VisionThread(threading.Thread):
 
     def run(self):
         logger.info("Démarrage du thread vision")
-
-        # Init caméra
         cap = cv2.VideoCapture(config.CAMERA_INDEX)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS, config.VISION_FPS_TARGET)
-
         if not cap.isOpened():
             logger.error("Impossible d'ouvrir la caméra (index %d)", config.CAMERA_INDEX)
             return
@@ -248,87 +280,57 @@ class VisionThread(threading.Thread):
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    logger.warning("Frame vide, tentative suivante...")
-                    time.sleep(0.01)
+                    time.sleep(0.05)
                     continue
 
+                self._last_frame = frame
                 self._frame_count += 1
-
-                # Skip frames pour économiser le CPU
-                if self._frame_count % config.VISION_SKIP_FRAMES != 0:
-                    continue
-
-                # FPS counter
                 fps_count += 1
-                elapsed = time.time() - fps_timer
-                if elapsed >= 1.0:
-                    self._fps = fps_count / elapsed
-                    fps_count = 0
-                    fps_timer = time.time()
 
-                # Conversion BGR → RGB pour Mediapipe
+                # FPS update toutes les secondes
+                now = time.time()
+                if now - fps_timer >= 1.0:
+                    self._fps = fps_count / (now - fps_timer)
+                    fps_count = 0
+                    fps_timer = now
+
+                # Conversion BGR -> RGB pour MediaPipe
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = face_mesh.process(rgb)
 
-                if not results.multi_face_landmarks:
-                    # Aucun visage détecté — on garde le dernier frame pour l'affichage
-                    self._last_frame = frame
-                    continue
+                if results.multi_face_landmarks:
+                    landmarks = results.multi_face_landmarks[0].landmark
+                    emotion_raw, score, debug_vals = _detect_emotion(landmarks)
+                    emotion_smoothed = self._smoother.update(emotion_raw)
 
-                # Prendre le premier visage détecté
-                face_landmarks = results.multi_face_landmarks[0]
-                landmarks = face_landmarks.landmark
-                h, w = frame.shape[:2]
+                    # Log periodique pour debug (toutes les 30 frames ~= 2s)
+                    if config.VISION_DEBUG_LOG and self._frame_count % 30 == 0:
+                        logger.debug(
+                            "Frame %d: raw=%s lisse=%s score=%.2f | %s",
+                            self._frame_count, emotion_raw, emotion_smoothed,
+                            score, debug_vals
+                        )
 
-                # Bounding box à partir des landmarks
-                xs = [lm.x * w for lm in landmarks]
-                ys = [lm.y * h for lm in landmarks]
-                x_min, x_max = int(min(xs)), int(max(xs))
-                y_min, y_max = int(min(ys)), int(max(ys))
-                box_w = x_max - x_min
-                box_h = y_max - y_min
+                    fd = FaceData(
+                        detected=True,
+                        emotion=emotion_smoothed,
+                        confidence=score,
+                        debug=debug_vals,
+                    )
+                    try:
+                        self.face_q.put_nowait(fd)
+                    except Exception:
+                        # Queue pleine - on drop
+                        pass
+                else:
+                    # Pas de visage : on pousse un FaceData neutre
+                    fd = FaceData(detected=False, emotion="neutral", confidence=0.0)
+                    try:
+                        self.face_q.put_nowait(fd)
+                    except Exception:
+                        pass
 
-                # Centre normalisé [-1, +1]
-                cx = ((x_min + x_max) / 2 - w / 2) / (w / 2)
-                cy = ((y_min + y_max) / 2 - h / 2) / (h / 2)
-
-                # Détection émotion
-                raw_emotion, confidence = _detect_emotion(landmarks)
-                smoothed_emotion = self._smoother.update(raw_emotion)
-
-                # Construire le résultat
-                face_data = FaceData(
-                    x=x_min, y=y_min, w=box_w, h=box_h,
-                    cx=round(cx, 3), cy=round(cy, 3),
-                    emotion=smoothed_emotion,
-                    confidence=confidence,
-                )
-
-                # Pousser dans la queue (non-bloquant, on drop si pleine)
-                if not self.face_q.full():
-                    self.face_q.put(face_data)
-
-                # Stocker le frame annoté pour le mode debug
-                self._last_frame = frame.copy()
-                cv2.rectangle(self._last_frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-                label = f"{smoothed_emotion} ({confidence:.0%})"
-                cv2.putText(self._last_frame, label, (x_min, y_min - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-        except Exception as e:
-            logger.exception("Erreur dans le thread vision : %s", e)
         finally:
-            face_mesh.close()
             cap.release()
+            face_mesh.close()
             logger.info("Thread vision arrêté (FPS moyen : %.1f)", self._fps)
-
-    # --- API publique (thread-safe en lecture seule) ---
-
-    @property
-    def fps(self):
-        return self._fps
-
-    @property
-    def last_frame(self):
-        """Dernier frame avec annotations (pour affichage debug)."""
-        return self._last_frame

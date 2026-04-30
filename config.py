@@ -26,10 +26,16 @@ VISION_MIN_CONFIDENCE = 0.5
 VISION_MAX_FACES      = 1
 EMOTION_SMOOTHING     = 5
 
-MAR_HAPPY_THRESHOLD   = 0.55
-EAR_PAIN_THRESHOLD    = 0.20
-BROW_SAD_THRESHOLD    = 0.018
-EMOTION_MIN_SCORE     = 0.40
+# === Seuils de detection d'emotion (Phase 8.4 v2) ===
+SMILE_HAPPY_THRESHOLD       = -0.030
+MAR_OPEN_MAX                = 0.6
+EAR_PAIN_THRESHOLD          = 0.20
+BROW_SQUEEZE_PAIN_THRESHOLD = 0.10
+SMILE_SAD_THRESHOLD         = -0.060
+BROW_DROP_SAD_THRESHOLD     = 0.40
+EMOTION_MIN_SCORE           = 0.40
+EMOTION_SMOOTHING           = 5
+VISION_DEBUG_LOG            = True
 
 # === AUDIO (Phase 7) ===
 VOSK_MODEL_PATH   = "assets/vosk-model-fr"
