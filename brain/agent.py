@@ -1,4 +1,5 @@
 # brain/agent.py - BrainThread multi-utilisateur
+# v2.0 : migration full Ollama via brain/llm_client.py (wrapper compat Anthropic)
 # brain_in_q recoit (user_id: str, text: str), brain_out_q emet (user_id, reply)
 # Une conversation courte distincte par user_id (self.histories)
 
@@ -7,7 +8,10 @@ import logging
 import threading
 from queue import Empty
 
-from anthropic import Anthropic
+# v2.0 : on remplace l'import direct du SDK anthropic par notre wrapper Ollama.
+# L'API expose la meme surface (client.messages.create), aucun autre changement
+# necessaire dans la boucle _handle_turn.
+from brain.llm_client import OllamaClient
 
 import config
 from brain.identity import Identity
@@ -23,7 +27,8 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        _client = Anthropic()  # lit ANTHROPIC_API_KEY
+        # v2.0 : OllamaClient lit config.OLLAMA_HOST + config.OLLAMA_MODEL
+        _client = OllamaClient()
     return _client
 
 
@@ -85,23 +90,25 @@ class BrainThread(threading.Thread):
         system = self._build_system(identity, query_hint=user_input)
         tools = filter_tools_for(identity)
 
-        # Fix : Claude envoie souvent du texte AVANT un tool_use (preface).
-        # On cumule les blocs texte a chaque iteration pour ne rien perdre.
+        # Modeles plus petits (qwen2.5:3b) peuvent emettre du texte AVANT un tool_use,
+        # comme Claude. On cumule les blocs texte a chaque iteration pour ne rien perdre.
         collected_text = []
 
         for iteration in range(config.BRAIN_MAX_TOOL_ITERATIONS):
             try:
                 resp = _get_client().messages.create(
-                    model=config.ANTHROPIC_MODEL,
+                    model=config.OLLAMA_MODEL,           # v2.0 : OLLAMA_MODEL
                     max_tokens=config.BRAIN_MAX_TOKENS,
                     system=system,
                     tools=tools,
                     messages=history,
                 )
             except Exception as e:
-                logger.exception("Erreur API Claude : %s", e)
+                # v2.0 : erreur typique = serveur Ollama injoignable ou modele non pulle
+                logger.exception("Erreur appel LLM : %s", e)
                 history.pop()
-                return f"Oups, j'ai eu un souci technique : {e}"
+                return (f"Oups, j'arrive pas a joindre mon cerveau local "
+                        f"(Ollama). Verifie que le service tourne. ({e})")
 
             history.append({"role": "assistant", "content": resp.content})
 
@@ -119,7 +126,6 @@ class BrainThread(threading.Thread):
             if resp.stop_reason != "tool_use":
                 final = " ".join(collected_text).strip()
                 if not final:
-                    # Filet de securite : Claude n'a rien dit malgre les tools
                     final = "C'est note !"
                 return final
 
@@ -143,15 +149,17 @@ class BrainThread(threading.Thread):
 
             history.append({"role": "user", "content": tool_results})
 
-        # Epuisement des iterations : on retourne ce qu'on a collecte
+        # Epuisement des iterations
         fallback = " ".join(collected_text).strip()
         if fallback:
             return fallback + " (j'ai un peu bugge, mais j'ai retenu l'essentiel)"
         return "Desole, j'ai boucle trop longtemps sur mes outils. Reformule ?"
 
     def run(self):
-        logger.info("Demarrage BrainThread (backend=%s, model=%s)",
-                    config.LLM_BACKEND, config.ANTHROPIC_MODEL)
+        # v2.0 : log Ollama au lieu d'Anthropic
+        logger.info("Demarrage BrainThread (backend=%s, model=%s, host=%s)",
+                    config.LLM_BACKEND, config.OLLAMA_MODEL,
+                    getattr(config, "OLLAMA_HOST", "http://localhost:11434"))
         summary = self.memory_mgr.counts_summary()
         logger.info("Memoires au demarrage : %s",
                     ", ".join(f"{k}={v}" for k, v in summary.items()))
@@ -162,7 +170,6 @@ class BrainThread(threading.Thread):
             except Empty:
                 continue
 
-            # Format attendu : (user_id, text)
             if not isinstance(item, tuple) or len(item) != 2:
                 logger.warning("Item invalide dans brain_in_q : %s", item)
                 continue
@@ -183,7 +190,6 @@ class BrainThread(threading.Thread):
         logger.info("BrainThread arrete")
 
     def reset_history(self, user_id: str = None):
-        # Reset la conv courte d'un user (ou de tous si None)
         if user_id is None:
             self.histories = {}
             logger.info("Toutes les conversations reinitialisees")

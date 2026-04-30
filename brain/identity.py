@@ -1,6 +1,7 @@
 # brain/identity.py - Identites des utilisateurs + ACL outils
-# Phase 8.1 modele B : famille ouverte + intimite couple
-# Phase 8.3 : remplacement de la detection par reconnaissance vocale
+# v1.1 modele B : famille ouverte + intimite couple
+# v2.0 : web_search retire (mode 100% offline). search_child_memory reste reserve parents.
+# Phase 8.3+ : remplacement de la detection par reconnaissance vocale (Resemblyzer)
 
 import re
 import logging
@@ -14,12 +15,11 @@ logger = logging.getLogger("walle.identity")
 
 
 # Mapping role -> outils autorises
-# Modele B : parents ont search_child_memory pour consulter la memoire perso des enfants
-# Ecriture reste cloisonnee : personne n'ecrit dans la memoire d'un autre
+# v2.0 : web_search retire pour tous (Ollama 100% offline, pas d'internet)
 _TOOLS_BY_ROLE = {
-    "parent":  {"save_memory", "search_memory", "web_search", "search_child_memory"},
-    "child":   {"save_memory", "search_memory"},    # pas de web_search, ni acces aux autres
-    "unknown": set(),                                # aucun outil
+    "parent":  {"save_memory", "search_memory", "search_child_memory"},
+    "child":   {"save_memory", "search_memory"},
+    "unknown": set(),
 }
 
 

@@ -1,15 +1,23 @@
 # brain/tools.py - Outils exposes au LLM avec ACL par identite
-# Phase 8.1 modele B : save, search, web (parents), search_child_memory (parents uniquement)
+# v2.0 : web_search retire (mode 100% offline).
+# v2.1 : _CHILD_NAMES calcule dynamiquement depuis config.USERS pour pseudonymisation.
 
 import logging
-from duckduckgo_search import DDGS
+
+import config
 
 logger = logging.getLogger("walle.tools")
 
 
-# Liste des enfants autorises comme cible de search_child_memory
-# Synchronise avec config.USERS (role=child). Hardcode ici pour limite dure.
-_CHILD_NAMES = ["louis", "william", "raphael", "ambre"]
+def _get_child_names() -> list:
+    """Liste les user_id ayant le role child. Calcul dynamique depuis config.USERS,
+    permet de garder ce fichier generique pour le repo public.
+    """
+    return [uid for uid, info in config.USERS.items() if info.get("role") == "child"]
+
+
+# Liste calculee au chargement du module
+_CHILD_NAMES = _get_child_names()
 
 
 TOOLS_ALL = [
@@ -55,14 +63,13 @@ TOOLS_ALL = [
     {
         "name": "search_child_memory",
         "description": (
-            "OUTIL RESERVE AUX PARENTS (Kat et Brice). Cherche dans la memoire perso d'un "
-            "de leurs enfants (Louis, William, Raphael, Ambre). A utiliser quand un parent "
-            "demande explicitement des nouvelles d'un enfant ou cherche ce qu'un enfant a "
-            "partage. Les enfants sont informes que leurs parents ont ce droit. "
-            "Principe : transmets les faits factuels (ecole, projets, passions, amis) "
-            "librement. Pour les confidences intimes d'ados (attirances, doutes sur soi, "
-            "conflits amicaux), resume en termes generaux et suggere au parent d'en "
-            "parler directement a l'enfant plutot que de citer textuellement."
+            "OUTIL RESERVE AUX PARENTS. Cherche dans la memoire perso d'un enfant du foyer. "
+            "A utiliser quand un parent demande explicitement des nouvelles d'un enfant ou "
+            "cherche ce qu'un enfant a partage. Les enfants sont informes que leurs parents "
+            "ont ce droit. Principe : transmets les faits factuels (ecole, projets, passions, "
+            "amis) librement. Pour les confidences intimes d'ados, resume en termes generaux "
+            "et suggere au parent d'en parler directement a l'enfant plutot que de citer "
+            "textuellement."
         ),
         "input_schema": {
             "type": "object",
@@ -70,27 +77,12 @@ TOOLS_ALL = [
                 "child_name": {
                     "type": "string",
                     "enum": _CHILD_NAMES,
-                    "description": "Prenom de l'enfant en minuscules",
+                    "description": "user_id de l'enfant (en minuscules, defini dans family_local.py)",
                 },
                 "query": {"type": "string", "description": "Requete semantique"},
                 "k": {"type": "integer", "default": 5},
             },
             "required": ["child_name", "query"],
-        },
-    },
-    {
-        "name": "web_search",
-        "description": (
-            "Recherche web via DuckDuckGo pour les faits recents ou d'actualite. "
-            "Reserve aux parents (Kat et Brice). Non disponible pour les enfants."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "max_results": {"type": "integer", "default": 5},
-            },
-            "required": ["query"],
         },
     },
 ]
@@ -103,12 +95,10 @@ def filter_tools_for(identity) -> list:
 def describe_tools(tools: list) -> str:
     if not tools:
         return "(aucun outil disponible pour cet interlocuteur)"
-    # On prend juste la premiere ligne de la description pour le system prompt
     return "\n".join(f"- {t['name']} : {t['description'].split('.')[0]}." for t in tools)
 
 
 def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
-    # Check ACL strict (double defense avec le filtrage cote LLM)
     if name not in identity.tools_allowed:
         logger.warning("ACL refus : user=%s tente %s", identity.user_id, name)
         return {
@@ -134,7 +124,6 @@ def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
             )
 
         if name == "search_child_memory":
-            # Double check : seul un parent peut acceder (l'ACL l'a deja fait, on re-valide)
             if not identity.is_parent():
                 return {"error": "search_child_memory reserve aux parents"}
             child = args["child_name"].lower()
@@ -144,16 +133,6 @@ def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
             logger.info("search_child_memory [%s -> %s] : %d resultats",
                         identity.user_id, child, len(docs))
             return {"child": child, "results": docs, "count": len(docs)}
-
-        if name == "web_search":
-            with DDGS() as ddgs:
-                raw = list(ddgs.text(args["query"], max_results=args.get("max_results", 5)))
-            return {
-                "results": [
-                    {"title": r["title"], "snippet": r["body"], "url": r["href"]}
-                    for r in raw
-                ]
-            }
 
         return {"error": f"outil inconnu : {name}"}
 

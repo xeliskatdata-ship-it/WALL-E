@@ -21,7 +21,7 @@ FAMILY_COLLECTION = "family"
 
 
 class MemoryManager:
-    """Gere les collections : une par user (mem_kat, mem_brice, ...) + mem_family.
+    """Gere les collections ChromaDB : une par user_id + une famille partagee.
 
     Regles :
     - save_perso(user_id, text)     : ecrit sur la collection perso du user

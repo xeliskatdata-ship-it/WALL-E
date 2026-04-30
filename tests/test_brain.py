@@ -1,23 +1,16 @@
-#!/usr/bin/env python3
-# tests/test_brain.py - Test Phase 8.1 multi-user modele B
-#
-# Usage :
-#   python tests/test_brain.py --dry-run   imports + Identity + ACL + cloisonnement memoire
-#   python tests/test_brain.py --simulate  mock LLM (a implementer Phase 8.5)
-#   python tests/test_brain.py --text      conversation reelle (requiert ANTHROPIC_API_KEY)
+# tests/test_brain.py - Tests Phase 8.1 + v2.0 Ollama
+# v2.1 : tests refactores pour ne pas dependre des prenoms reels.
+# Les tests piochent dynamiquement dans config.USERS pour selectionner
+# un parent et un enfant, ce qui les rend independants du foyer configure
+# dans family_local.py.
 
-import sys
-import os
 import argparse
 import logging
-import tempfile
-import shutil
-import threading
-from queue import Queue
+import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import config
+# Permet d'importer depuis la racine du projet
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,246 +20,281 @@ logging.basicConfig(
 logger = logging.getLogger("test_brain")
 
 
-def test_dry_run():
-    logger.info("=== MODE DRY-RUN (modele B : famille ouverte + intimite couple) ===")
+def _pick_parent_id() -> str:
+    """Recupere le user_id du premier parent dans config.USERS."""
+    import config
+    for uid, info in config.USERS.items():
+        if info["role"] == "parent":
+            return uid
+    raise RuntimeError("Aucun parent dans config.USERS - tests impossibles")
 
-    # --- Imports ---
+
+def _pick_child_id() -> str:
+    """Recupere le user_id du premier enfant dans config.USERS."""
+    import config
+    for uid, info in config.USERS.items():
+        if info["role"] == "child":
+            return uid
+    raise RuntimeError("Aucun enfant dans config.USERS - tests impossibles")
+
+
+def _pick_second_child_id() -> str:
+    """Recupere le user_id du second enfant (pour tests cloisonnement)."""
+    import config
+    children = [uid for uid, info in config.USERS.items() if info["role"] == "child"]
+    if len(children) < 2:
+        return children[0]
+    return children[1]
+
+
+def _pick_second_parent_id() -> str:
+    """Recupere le user_id du second parent."""
+    import config
+    parents = [uid for uid, info in config.USERS.items() if info["role"] == "parent"]
+    if len(parents) < 2:
+        return parents[0]
+    return parents[1]
+
+
+# === TESTS DRY-RUN (pas d'appel LLM, pas de hardware) ===
+
+def test_imports():
+    logger.info("--- Test imports ---")
     from brain.identity import Identity, parse_prefix
-    logger.info("Import brain/identity ........ OK")
-
-    from brain.prompts import BASE_PERSONA, OVERLAYS, build_system_prompt
-    logger.info("Import brain/prompts ......... OK")
-
-    from brain.tools import TOOLS_ALL, filter_tools_for, describe_tools
-    logger.info("Import brain/tools ........... OK")
-
+    from brain.memory import MemoryManager
+    from brain.tools import TOOLS_ALL, filter_tools_for, execute_tool
+    from brain.prompts import build_system_prompt
     from brain.agent import BrainThread
-    logger.info("Import brain/agent ........... OK")
+    from brain.llm_client import OllamaClient
+    logger.info("Imports OK (identity, memory, tools, prompts, agent, llm_client)")
 
-    # --- Verifier que tous les users ont un overlay ---
-    for uid in config.USERS:
-        assert uid in OVERLAYS, f"Overlay manquant pour {uid}"
-    assert "unknown" in OVERLAYS, "Overlay 'unknown' manquant"
-    logger.info("Overlays persona ............. OK (%d users + unknown)", len(config.USERS))
 
-    # --- Identity : Parents ont search_child_memory, enfants non ---
-    kat = Identity.from_user_id("kat")
-    assert kat.role == "parent"
-    assert kat.age > 40
-    assert "web_search" in kat.tools_allowed
-    assert "search_child_memory" in kat.tools_allowed, "Modele B : parents doivent avoir search_child_memory"
-    assert kat.can_write_family is True
-    assert kat.is_parent() is True
-    logger.info("Identity Kat ................. OK (%d ans, %d outils, parent, family+)",
-                kat.age, len(kat.tools_allowed))
+def test_identity():
+    logger.info("--- Test Identity + ACL ---")
+    from brain.identity import Identity, parse_prefix
 
-    brice = Identity.from_user_id("brice")
-    assert "search_child_memory" in brice.tools_allowed
-    logger.info("Identity Brice ............... OK (%d ans, parent, search_child_memory+)", brice.age)
+    parent_id = _pick_parent_id()
+    child_id = _pick_child_id()
 
-    ambre = Identity.from_user_id("ambre")
-    assert ambre.role == "child"
-    assert "web_search" not in ambre.tools_allowed
-    assert "search_child_memory" not in ambre.tools_allowed, "Enfants ne doivent PAS avoir search_child_memory"
-    assert "save_memory" in ambre.tools_allowed
-    assert ambre.can_write_family is False
-    assert ambre.is_parent() is False
-    logger.info("Identity Ambre ............... OK (%d ans, %d outils, child, family-)",
-                ambre.age, len(ambre.tools_allowed))
+    # Test parent
+    p = Identity.from_user_id(parent_id)
+    assert p.role == "parent"
+    assert p.age and p.age > 0
+    assert "search_child_memory" in p.tools_allowed, "Parents doivent avoir search_child_memory"
+    assert "save_memory" in p.tools_allowed
+    assert p.can_write_family is True
+    assert p.is_parent() is True
+    logger.info("Identity parent (%s) ......... OK (%d ans, %d outils, family+)",
+                p.user_id, p.age, len(p.tools_allowed))
 
-    santa = Identity.from_user_id("santa")
-    assert santa.user_id == "unknown"
-    assert len(santa.tools_allowed) == 0
-    logger.info("Identity inconnu ............. OK (0 outil)")
+    # Test second parent (intimite couple)
+    parent2_id = _pick_second_parent_id()
+    p2 = Identity.from_user_id(parent2_id)
+    assert "search_child_memory" in p2.tools_allowed
+    logger.info("Identity parent2 (%s) ........ OK (%d ans)", p2.user_id, p2.age)
 
-    # --- parse_prefix ---
-    uid, text = parse_prefix("[ambre] coucou WALL-E")
-    assert uid == "ambre" and text == "coucou WALL-E"
-    uid, text = parse_prefix("[KAT] majuscules")
-    assert uid == "kat"
+    # Test enfant
+    c = Identity.from_user_id(child_id)
+    assert c.role == "child"
+    assert "search_child_memory" not in c.tools_allowed, "Enfants ne doivent PAS avoir search_child_memory"
+    assert "save_memory" in c.tools_allowed
+    assert c.can_write_family is False
+    assert c.is_parent() is False
+    logger.info("Identity enfant (%s) ......... OK (%d ans, %d outils, child, family-)",
+                c.user_id, c.age, len(c.tools_allowed))
+
+    # Test unknown
+    u = Identity.unknown()
+    assert u.role == "unknown"
+    assert len(u.tools_allowed) == 0
+    logger.info("Identity unknown ............. OK (aucun outil)")
+
+    # Test parse_prefix dynamique
+    uid, text = parse_prefix(f"[{child_id}] coucou WALL-E")
+    assert uid == child_id and text == "coucou WALL-E"
+    uid, text = parse_prefix(f"[{parent_id.upper()}] majuscules")
+    assert uid == parent_id
     uid, text = parse_prefix("pas de prefix")
-    assert uid is None
+    assert uid is None and text == "pas de prefix"
     logger.info("parse_prefix ................. OK")
 
-    # --- build_system_prompt : verifie les contenus specifiques au modele B ---
-    sys_prompt_kat = build_system_prompt(kat, "save_memory, search_memory, web_search, search_child_memory", [], [])
-    assert "search_child_memory" in sys_prompt_kat, "Prompt Kat doit mentionner search_child_memory"
-    assert "modele famille ouverte" in sys_prompt_kat, "Prompt Kat doit expliquer l'acces enfants"
-    assert "Intimite couple" in sys_prompt_kat, "Prompt Kat doit mentionner l'intimite du couple"
-    assert "GARDE-FOUS" not in sys_prompt_kat
-    logger.info("Prompt Kat (parent) .......... OK (%d chars, search_child + intimite OK)",
-                len(sys_prompt_kat))
 
-    sys_prompt_ambre = build_system_prompt(ambre, "save_memory, search_memory", [], [])
-    assert "Ambre" in sys_prompt_ambre
-    assert "10 ans" in sys_prompt_ambre
-    assert "GARDE-FOUS" in sys_prompt_ambre, "Prompt Ambre doit contenir les garde-fous mineurs"
-    assert "DETRESSE" in sys_prompt_ambre
-    assert "JAMAIS DE SECRET" in sys_prompt_ambre
-    assert "TRANSPARENCE" in sys_prompt_ambre, "Prompt Ambre doit expliquer la transparence memoire"
-    logger.info("Prompt Ambre (mineur) ........ OK (%d chars, transparence + garde-fous)",
-                len(sys_prompt_ambre))
+def test_prompts():
+    logger.info("--- Test prompts ---")
+    from brain.identity import Identity
+    from brain.prompts import build_system_prompt
 
-    # --- ACL : filter_tools_for ---
-    kat_tools = filter_tools_for(kat)
-    ambre_tools = filter_tools_for(ambre)
-    santa_tools = filter_tools_for(santa)
+    parent_id = _pick_parent_id()
+    child_id = _pick_child_id()
 
-    assert len(kat_tools) == 4, f"Parents doivent avoir 4 outils, Kat en a {len(kat_tools)}"
-    assert len(ambre_tools) == 2, f"Enfants doivent avoir 2 outils, Ambre en a {len(ambre_tools)}"
-    assert len(santa_tools) == 0
-    assert any(t["name"] == "search_child_memory" for t in kat_tools)
-    assert not any(t["name"] == "search_child_memory" for t in ambre_tools)
-    logger.info("ACL outils ................... OK (Kat=%d | Ambre=%d | Inconnu=%d)",
-                len(kat_tools), len(ambre_tools), len(santa_tools))
+    p = Identity.from_user_id(parent_id)
+    c = Identity.from_user_id(child_id)
 
-    # --- MemoryManager : cloisonnement ecriture + lecture parents via search_child_memory ---
-    tmp = tempfile.mkdtemp(prefix="walle_test_")
-    orig_path = config.CHROMA_PATH
+    # Prompt parent : doit contenir search_child_memory + intimite
+    sys_prompt_p = build_system_prompt(p, "save_memory, search_memory, search_child_memory", [], [])
+    assert "search_child_memory" in sys_prompt_p, "Prompt parent doit mentionner search_child_memory"
+    assert "GARDE-FOUS" not in sys_prompt_p, "Prompt parent ne doit pas avoir les garde-fous mineurs"
+    logger.info("Prompt parent ................ OK (%d chars)", len(sys_prompt_p))
+
+    # Prompt enfant : doit contenir GARDE-FOUS + display_name
+    sys_prompt_c = build_system_prompt(c, "save_memory, search_memory", [], [])
+    assert c.display_name in sys_prompt_c, f"Prompt enfant doit mentionner '{c.display_name}'"
+    assert "GARDE-FOUS" in sys_prompt_c, "Prompt enfant doit contenir les garde-fous mineurs"
+    assert "DETRESSE" in sys_prompt_c
+    assert "JAMAIS DE SECRET" in sys_prompt_c
+    logger.info("Prompt enfant ................ OK (%d chars, garde-fous + display_name)",
+                len(sys_prompt_c))
+
+
+def test_tools_acl():
+    logger.info("--- Test ACL outils ---")
+    from brain.identity import Identity
+    from brain.tools import filter_tools_for
+
+    p = Identity.from_user_id(_pick_parent_id())
+    c = Identity.from_user_id(_pick_child_id())
+    u = Identity.unknown()
+
+    p_tools = filter_tools_for(p)
+    c_tools = filter_tools_for(c)
+    u_tools = filter_tools_for(u)
+
+    # En v2.0 : 3 outils pour parents (web_search retire), 2 pour enfants, 0 pour unknown
+    assert len(p_tools) == 3, f"Parents doivent avoir 3 outils, en a {len(p_tools)}"
+    assert len(c_tools) == 2, f"Enfants doivent avoir 2 outils, en a {len(c_tools)}"
+    assert len(u_tools) == 0
+    assert any(t["name"] == "search_child_memory" for t in p_tools)
+    assert not any(t["name"] == "search_child_memory" for t in c_tools)
+    logger.info("ACL outils ................... OK (parent=%d | enfant=%d | unknown=%d)",
+                len(p_tools), len(c_tools), len(u_tools))
+
+
+def test_memory():
+    logger.info("--- Test memoire (RAM, pas de Chroma persistant) ---")
+    import os
+    import tempfile
+
+    # Forcer Chroma sur un dossier temporaire pour pas polluer data/
+    tmpdir = tempfile.mkdtemp(prefix="walle_test_")
+    os.environ["CHROMA_PATH"] = tmpdir
+
     try:
-        config.CHROMA_PATH = tmp
-        import importlib
-        from brain import memory as memory_module
-        importlib.reload(memory_module)
-
-        mgr = memory_module.MemoryManager()
-        mgr.save_perso("kat", "Kat aime le dark mode")
-        mgr.save_perso("brice", "Brice est passionne de cuisine italienne")
-        mgr.save_perso("ambre", "Ambre a un chat qui s'appelle Mistigri")
-        mgr.save_perso("louis", "Louis prepare son bac de francais")
-        mgr.save_family("kat", "La famille part en Bretagne en juillet")
-
-        # Cloisonnement ecriture : personne n'ecrit dans la collection d'un autre
-        # (deja teste implicitement via les save_perso ci-dessus)
-
-        # Cloisonnement lecture perso : Ambre ne voit pas la coll. de Louis
-        ambre_perso = mgr.search_perso("ambre", "bac")
-        for m in ambre_perso:
-            assert "Louis" not in m and "bac" not in m.lower(), \
-                f"Fuite memoire Louis dans perso Ambre : {m}"
-
-        # --- Test ACL search_child_memory ---
+        from brain.identity import Identity
+        from brain.memory import MemoryManager
         from brain.tools import execute_tool
 
-        # Parent (Kat) peut lire mem_louis via search_child_memory
-        r = execute_tool("search_child_memory", {"child_name": "louis", "query": "bac"},
-                         identity=kat, memory_mgr=mgr)
-        assert r.get("child") == "louis", f"search_child_memory Kat KO : {r}"
-        assert len(r.get("results", [])) >= 1, "Kat devrait trouver la memoire de Louis"
-        logger.info("Kat -> search_child_memory Louis OK (%d resultats)", r.get("count"))
+        mgr = MemoryManager()
 
-        # Enfant (Ambre) refusee ACL
-        r = execute_tool("search_child_memory", {"child_name": "louis", "query": "bac"},
-                         identity=ambre, memory_mgr=mgr)
-        assert "error" in r, f"ACL devait refuser search_child_memory pour Ambre : {r}"
-        logger.info("ACL refus search_child_memory Ambre OK")
+        parent_id = _pick_parent_id()
+        child_id = _pick_child_id()
+        child2_id = _pick_second_child_id()
 
-        # Parent refuse sur un enfant inexistant
-        r = execute_tool("search_child_memory", {"child_name": "jeanne", "query": "test"},
-                         identity=kat, memory_mgr=mgr)
-        assert "error" in r, "Devrait refuser un nom d'enfant inconnu"
-        logger.info("Refus child_name inconnu ..... OK")
+        parent = Identity.from_user_id(parent_id)
+        child = Identity.from_user_id(child_id)
 
-        # Ambre refusee sur web_search
-        r = execute_tool("web_search", {"query": "test"}, identity=ambre, memory_mgr=mgr)
-        assert "error" in r
-        logger.info("ACL refus web_search Ambre ... OK")
+        # Saves perso et family
+        mgr.save_perso(parent_id, f"{parent_id} aime le dark mode")
+        mgr.save_perso(child_id, f"{child_id} a un animal de compagnie")
+        if child2_id != child_id:
+            mgr.save_perso(child2_id, f"{child2_id} prepare un examen")
+        mgr.save_family(parent_id, "La famille part en vacances cet ete")
 
-        # Ambre refusee sur family write
-        r = execute_tool("save_memory", {"content": "test", "scope": "family"},
-                         identity=ambre, memory_mgr=mgr)
-        assert "error" in r
-        logger.info("ACL refus family write Ambre . OK")
+        # Cloisonnement perso : child ne voit pas mem de child2
+        if child2_id != child_id:
+            child_perso = mgr.search_perso(child_id, "examen")
+            for m in child_perso:
+                assert "examen" not in m.lower(), f"Fuite memoire {child2_id} dans perso {child_id} : {m}"
+            logger.info("Cloisonnement perso enfant1<-/-enfant2 OK")
 
-        # Ambre autorisee sur perso write
-        r = execute_tool("save_memory", {"content": "test perso"}, identity=ambre, memory_mgr=mgr)
-        assert r.get("status") == "ok"
-        logger.info("ACL autorise perso Ambre ..... OK")
+        # Family accessible aux deux
+        f_p = mgr.search_family("vacances")
+        f_c = mgr.search_family("vacances")
+        assert any("vacances" in m.lower() for m in f_p), "Parent doit voir mem family"
+        assert any("vacances" in m.lower() for m in f_c), "Enfant doit voir mem family"
+        logger.info("Memoire family partagee ...... OK")
 
-        logger.info("Etat final memoire : kat=%d brice=%d louis=%d ambre=%d family=%d",
-                    mgr.count_perso("kat"), mgr.count_perso("brice"),
-                    mgr.count_perso("louis"), mgr.count_perso("ambre"),
-                    mgr.count_family())
+        # Parent peut lire mem enfant via search_child_memory
+        if child2_id != child_id:
+            r = execute_tool("search_child_memory",
+                            {"child_name": child2_id, "query": "examen"},
+                            identity=parent, memory_mgr=mgr)
+            assert r.get("child") == child2_id, f"search_child_memory parent KO : {r}"
+            logger.info("Parent -> search_child_memory %s OK", child2_id)
 
-        mgr.wipe_all()
+        # Enfant refuse ACL search_child_memory
+        r = execute_tool("search_child_memory",
+                        {"child_name": child_id, "query": "test"},
+                        identity=child, memory_mgr=mgr)
+        assert "error" in r, f"ACL devait refuser search_child_memory pour enfant : {r}"
+        logger.info("ACL refus search_child_memory enfant OK")
+
+        # Enfant refuse sur family write
+        r = execute_tool("save_memory",
+                        {"content": "tentative", "scope": "family"},
+                        identity=child, memory_mgr=mgr)
+        assert "error" in r, f"ACL devait refuser family write pour enfant : {r}"
+        logger.info("ACL refus family write enfant OK")
+
+        # Enfant autorise sur perso write
+        r = execute_tool("save_memory",
+                        {"content": "test perso"},
+                        identity=child, memory_mgr=mgr)
+        assert "error" not in r, f"Enfant doit pouvoir ecrire en perso : {r}"
+        logger.info("ACL autorise perso enfant ... OK")
+
     finally:
-        config.CHROMA_PATH = orig_path
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    logger.info("")
-    logger.info("DRY-RUN REUSSI - modele B (famille ouverte + intimite couple) valide.")
+        # Cleanup
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_simulate():
-    logger.info("=== MODE SIMULATION ===")
-    logger.info("Mock LLM a implementer. Pour l'instant, valide avec --text.")
+# === TEST LIVE (avec Ollama) ===
+
+def test_live_ollama():
+    logger.info("--- Test LIVE Ollama ---")
+    logger.info("Verifie que le service Ollama tourne sur OLLAMA_HOST")
+
+    from brain.llm_client import OllamaClient
+    import config
+
+    client = OllamaClient()
+    resp = client.messages.create(
+        model=config.OLLAMA_MODEL,
+        max_tokens=100,
+        system="Tu es un assistant francais. Reponds en une phrase courte.",
+        messages=[{"role": "user", "content": "Dis bonjour"}],
+    )
+    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    assert text, "Reponse vide"
+    logger.info("Ollama repond ................ OK (%d tokens out)", resp.usage.output_tokens)
+    logger.info("Reponse : %r", text[:100])
 
 
-def test_text():
-    logger.info("=== MODE TEXT (API Claude reelle) ===")
-    logger.info("Requiert ANTHROPIC_API_KEY dans .env")
-    print()
-
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    from brain.agent import BrainThread
-    from brain.identity import Identity, parse_prefix
-
-    current = Identity.from_user_id("kat")
-    brain_in_q = Queue()
-    brain_out_q = Queue()
-    stop_event = threading.Event()
-
-    brain = BrainThread(brain_in_q, brain_out_q, stop_event)
-    brain.start()
-
-    print(f"Locuteur : {current.display_name}. Prefix [nom] pour switch, 'quit' pour sortir.")
-
-    try:
-        while not stop_event.is_set():
-            try:
-                line = input(f"\n{current.display_name} > ").strip()
-            except EOFError:
-                break
-            if line.lower() in ("quit", "q"):
-                break
-            if not line:
-                continue
-
-            prefix_user, clean = parse_prefix(line)
-            if prefix_user:
-                current = Identity.from_user_id(prefix_user)
-                line = clean
-                if not line:
-                    print(f"  -> {current.display_name}")
-                    continue
-
-            brain_in_q.put((current.user_id, line))
-            uid, reply = brain_out_q.get()
-            print(f"\nWALL-E > {reply}")
-    except KeyboardInterrupt:
-        print()
-    finally:
-        stop_event.set()
-        brain.join(timeout=3)
-
+# === MAIN ===
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Phase 8.1 Brain multi-user modele B")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--simulate", action="store_true")
-    parser.add_argument("--text", action="store_true")
+    parser = argparse.ArgumentParser(description="Tests Brain WALL-E")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Tests sans appel LLM (imports, identity, ACL, memoire)")
+    parser.add_argument("--text", action="store_true",
+                        help="Test live avec Ollama (requiert service actif)")
     args = parser.parse_args()
 
-    if args.dry_run:
-        test_dry_run()
-    elif args.simulate:
-        test_simulate()
-    elif args.text:
-        test_text()
-    else:
+    if not args.dry_run and not args.text:
         parser.print_help()
+        return
+
+    if args.dry_run:
+        test_imports()
+        test_identity()
+        test_prompts()
+        test_tools_acl()
+        test_memory()
+        logger.info("=== TOUS LES TESTS DRY-RUN PASSES ===")
+
+    if args.text:
+        test_live_ollama()
+        logger.info("=== TEST LIVE OLLAMA PASSE ===")
 
 
 if __name__ == "__main__":

@@ -46,3 +46,14 @@ logs/
 arduino/.build/
 arduino/*.elf
 arduino/*.hex
+
+# == family ==
+family_local.py
+brain/personas_local.py
+
+#== tests ==
+test_capture.wav
+*.SAVE_KAT
+test_mic.py
+test_stt_thread.py
+

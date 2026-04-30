@@ -1,4 +1,5 @@
-# requirements.txt - WALL-E
+# requirements.txt - WALL-E v2.0
+# Migration full Ollama : anthropic + duckduckgo retires.
 
 # Phase 2 : Vision
 opencv-python-headless>=4.9
@@ -16,21 +17,29 @@ numpy>=1.26
 # vosk>=0.3
 # pyaudio>=0.2
 # pyttsx3>=2.90
-# faster-whisper>=1.0        # alternative Whisper local
-# librosa>=0.10              # pipeline effet robot
-# scipy>=1.11                # bandpass filter
-# pygame>=2.5                # playback audio
+# faster-whisper>=1.0
+# librosa>=0.10
+# scipy>=1.11
+# pygame>=2.5
 
-# Phase 8 : Brain (ACTIVE)
-anthropic>=0.40.0
+# Phase 8 : Brain (ACTIVE) - v2.0 OLLAMA
+ollama>=0.3.0
 chromadb>=0.5.0
 python-dotenv>=1.0.0
-duckduckgo-search>=6.0.0
 
-# Phase 8.5 : Fallback offline (optionnel)
-# ollama>=0.3
+# DEPRECATED v2.0 : abandon de l'API Claude au profit d'Ollama 100% offline
+# anthropic>=0.40.0
+# duckduckgo-search>=6.0.0
+
 # Phase 8.3 partielle : STT local
 SpeechRecognition>=3.10.0
-pyaudio>=0.2.13
+#pyaudio>=0.2.13     # TODO : installer manuellement, incompat Python 3.14
 sounddevice>=0.4.7
-numpy>=1.24.0
+
+# Phase 8.7 v2.0 : autonomie (a installer quand on attaque la phase)
+# openwakeword>=0.6.0
+
+# Phase 8.8 v2.0 : voice ID + invites (a installer quand on attaque la phase)
+# resemblyzer>=0.1.4
+# spacy>=3.7.0
+# # puis : python -m spacy download fr_core_news_sm

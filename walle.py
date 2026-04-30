@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # walle.py - Orchestrateur WALL-E
-# Phase 8.1 multi-user + Phase 8.3 partielle (STT Windows avant deploiement Pi 5)
-# user_in_q unifie clavier + micro : source = "keyboard" ou "voice"
+# v2.0 : backend Ollama 100% offline + Phase 8.3 partielle (STT Windows)
+# v2.1 : pseudonymisation - default user lu dynamiquement depuis config
 
 import argparse
 import logging
@@ -27,16 +27,17 @@ from brain.identity import Identity, parse_prefix
 def print_welcome(current_user, stt_enabled):
     print()
     print("=" * 60)
-    title = "  WALL-E reveille - Phase 8.1 (texte, multi-user)"
+    title = "  WALL-E reveille - v2.0 (Ollama offline, multi-user)"
     if stt_enabled:
         title += " + STT"
     print(title)
-    print(f"  Backend : {config.LLM_BACKEND} / {config.ANTHROPIC_MODEL}")
+    print(f"  Backend : {config.LLM_BACKEND} / {config.OLLAMA_MODEL}")
+    print(f"  Host    : {config.OLLAMA_HOST}")
     age_str = f", {current_user.age} ans" if current_user.age else ""
     print(f"  Locuteur courant : {current_user.display_name} ({current_user.role}{age_str})")
     print()
     print("  Commandes (clavier) :")
-    print("    [prenom] bonjour...    changer de locuteur et continuer la phrase")
+    print("    [user_id] bonjour...   changer de locuteur et continuer la phrase")
     print("    /who                   qui parle actuellement ?")
     print("    /users                 liste des users connus")
     print("    /reset                 efface la conv du locuteur courant")
@@ -48,8 +49,6 @@ def print_welcome(current_user, stt_enabled):
 
 
 def keyboard_worker(user_in_q, stop_event):
-    # Thread clavier : input() en boucle -> push ("keyboard", text) dans user_in_q
-    # Daemon : meurt avec le main, pas besoin de stop propre
     while not stop_event.is_set():
         try:
             line = input()
@@ -64,32 +63,35 @@ def keyboard_worker(user_in_q, stop_event):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WALL-E Phase 8.1 multi-user + STT")
+    # User par defaut depuis config (charge depuis family_local.py si dispo)
+    default_user = getattr(config, "DEFAULT_USER", "parent_1")
+
+    parser = argparse.ArgumentParser(description="WALL-E v2.0 multi-user + STT (Ollama offline)")
     parser.add_argument(
-        "--user", type=str, default="kat",
-        help="Locuteur par defaut au demarrage (kat, brice, louis, william, raphael, ambre)",
+        "--user", type=str, default=default_user,
+        help=f"Locuteur par defaut au demarrage (defaut : {default_user})",
     )
     parser.add_argument(
         "--no-stt", action="store_true",
-        help="Desactive le STT meme si config.STT_ENABLED=True (mode clavier pur)",
+        help="Desactive le STT meme si config.STT_ENABLED=True",
     )
     args = parser.parse_args()
 
     current_identity = Identity.from_user_id(args.user)
     if current_identity.user_id == "unknown":
-        print(f"ATTENTION : user '{args.user}' inconnu, fallback sur 'kat'")
-        current_identity = Identity.from_user_id("kat")
+        # Fallback sur le premier user de config.USERS si --user invalide
+        first_user = next(iter(config.USERS.keys()), default_user)
+        print(f"ATTENTION : user '{args.user}' inconnu, fallback sur '{first_user}'")
+        current_identity = Identity.from_user_id(first_user)
 
     brain_in_q = Queue(maxsize=20)
     brain_out_q = Queue(maxsize=20)
-    user_in_q = Queue(maxsize=20)   # Unifie clavier + micro
+    user_in_q = Queue(maxsize=20)
     stop_event = threading.Event()
 
-    # Brain
     brain = BrainThread(brain_in_q, brain_out_q, stop_event)
     brain.start()
 
-    # STT optionnel : fallback gracieux si sounddevice / micro indispo
     stt_thread = None
     stt_enabled = config.STT_ENABLED and not args.no_stt
     if stt_enabled:
@@ -110,7 +112,6 @@ def main():
             logger.error(f"STT non demarre : {e}")
             stt_enabled = False
 
-    # Clavier toujours actif (meme quand STT marche, fallback tapage)
     kb_thread = threading.Thread(
         target=keyboard_worker, args=(user_in_q, stop_event),
         daemon=True, name="KeyboardThread",
@@ -121,17 +122,14 @@ def main():
 
     try:
         while not stop_event.is_set():
-            # Attente entree (clavier ou voix), timeout pour check stop
             try:
                 source, line = user_in_q.get(timeout=0.5)
             except Empty:
                 continue
 
-            # Affichage de l'entree avec sa source
             label = "[voix]" if source == "voice" else "[clavier]"
             print(f"\n{current_identity.display_name} {label} > {line}")
 
-            # Commandes slash (marchent surtout au clavier, Google ne transcrit pas "/")
             low = line.lower()
             if low in ("/quit", "/exit", "/q"):
                 break
@@ -151,7 +149,6 @@ def main():
                       f"(memoire long terme preservee)")
                 continue
 
-            # Prefix [prenom] pour switch locuteur (fonctionne en clavier)
             prefix_user, clean_text = parse_prefix(line)
             if prefix_user:
                 new_identity = Identity.from_user_id(prefix_user)
@@ -164,7 +161,6 @@ def main():
                     print(f"  -> locuteur courant : {current_identity.display_name}{age_str}")
                     continue
 
-            # Envoi au brain (tuple protocole) et attente reponse bloquante
             brain_in_q.put((current_identity.user_id, line))
             reply_uid, reply = brain_out_q.get()
             print(f"\nWALL-E > {reply}\n")
