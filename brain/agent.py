@@ -1,5 +1,7 @@
 # brain/agent.py - BrainThread multi-utilisateur
 # v2.0 : migration full Ollama via brain/llm_client.py (wrapper compat Anthropic)
+# v2.2 : integration de la couche safety deterministe (Phase 8.6)
+#
 # brain_in_q recoit (user_id: str, text: str), brain_out_q emet (user_id, reply)
 # Une conversation courte distincte par user_id (self.histories)
 
@@ -8,9 +10,6 @@ import logging
 import threading
 from queue import Empty
 
-# v2.0 : on remplace l'import direct du SDK anthropic par notre wrapper Ollama.
-# L'API expose la meme surface (client.messages.create), aucun autre changement
-# necessaire dans la boucle _handle_turn.
 from brain.llm_client import OllamaClient
 
 import config
@@ -18,6 +17,7 @@ from brain.identity import Identity
 from brain.memory import MemoryManager
 from brain.tools import filter_tools_for, describe_tools, execute_tool
 from brain.prompts import build_system_prompt
+from brain.safety import SafetyFilter   # v2.2 : couche safety
 
 logger = logging.getLogger("walle.brain")
 
@@ -27,7 +27,6 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        # v2.0 : OllamaClient lit config.OLLAMA_HOST + config.OLLAMA_MODEL
         _client = OllamaClient()
     return _client
 
@@ -37,10 +36,6 @@ class BrainThread(threading.Thread):
 
     Entree : brain_in_q recoit des tuples (user_id: str, text: str)
     Sortie : brain_out_q emet (user_id: str, reply: str)
-
-    Chaque user a sa propre conversation courte dans self.histories[user_id].
-    La memoire long terme est geree centralement par MemoryManager.
-    Les personas et ACL sont resolues via Identity.from_user_id().
     """
 
     def __init__(self, brain_in_q, brain_out_q, stop_event=None,
@@ -50,13 +45,13 @@ class BrainThread(threading.Thread):
         self.brain_out_q = brain_out_q
         self.stop_event = stop_event or threading.Event()
 
-        # Reserves Phases 8.2+
         self.motor_q = motor_q
         self.face_q = face_q
         self.motors_thread = motors_thread
 
         self.memory_mgr = MemoryManager()
-        self.histories = {}  # user_id -> liste messages court terme
+        self.safety = SafetyFilter()           # v2.2 : safety deterministe
+        self.histories = {}
 
     def _get_history(self, user_id: str):
         if user_id not in self.histories:
@@ -84,27 +79,36 @@ class BrainThread(threading.Thread):
         )
 
     def _handle_turn(self, identity: Identity, user_input: str) -> str:
+        # === SAFETY NIVEAU 2 : check input avant tout appel LLM ===
+        # Si signal de detresse detecte, on ne consulte pas le LLM.
+        # On retourne directement le message de redirection.
+        in_check = self.safety.check_input(user_input, identity)
+        if not in_check.passed:
+            logger.warning("Safety [%s] input bloque : %s",
+                           identity.user_id, in_check.reason)
+            # Important : on N'AJOUTE PAS l'input/reply a l'historique pour
+            # eviter que le LLM "voit" la detresse au prochain tour et
+            # essaie d'y repondre. Le tour est traite hors-LLM.
+            return in_check.replacement
+
         history = self._get_history(identity.user_id)
         history.append({"role": "user", "content": user_input})
 
         system = self._build_system(identity, query_hint=user_input)
         tools = filter_tools_for(identity)
 
-        # Modeles plus petits (qwen2.5:3b) peuvent emettre du texte AVANT un tool_use,
-        # comme Claude. On cumule les blocs texte a chaque iteration pour ne rien perdre.
         collected_text = []
 
         for iteration in range(config.BRAIN_MAX_TOOL_ITERATIONS):
             try:
                 resp = _get_client().messages.create(
-                    model=config.OLLAMA_MODEL,           # v2.0 : OLLAMA_MODEL
+                    model=config.OLLAMA_MODEL,
                     max_tokens=config.BRAIN_MAX_TOKENS,
                     system=system,
                     tools=tools,
                     messages=history,
                 )
             except Exception as e:
-                # v2.0 : erreur typique = serveur Ollama injoignable ou modele non pulle
                 logger.exception("Erreur appel LLM : %s", e)
                 history.pop()
                 return (f"Oups, j'arrive pas a joindre mon cerveau local "
@@ -112,7 +116,6 @@ class BrainThread(threading.Thread):
 
             history.append({"role": "assistant", "content": resp.content})
 
-            # Texte de ce tour (preface avant tool_use OU reponse finale)
             iteration_text = "".join(
                 b.text for b in resp.content if b.type == "text"
             ).strip()
@@ -127,6 +130,19 @@ class BrainThread(threading.Thread):
                 final = " ".join(collected_text).strip()
                 if not final:
                     final = "C'est note !"
+
+                # === SAFETY NIVEAU 1 : check output (mineurs uniquement) ===
+                out_check = self.safety.check_output(final, identity)
+                if not out_check.passed:
+                    logger.warning("Safety [%s] output bloque : %s",
+                                   identity.user_id, out_check.reason)
+                    # On retire le dernier echange de l'historique pour eviter
+                    # que le LLM "apprenne" de cette sortie problematique
+                    if len(history) >= 2:
+                        history.pop()  # assistant
+                        history.pop()  # user
+                    return out_check.replacement
+
                 return final
 
             # Tool use : execute avec ACL
@@ -152,14 +168,18 @@ class BrainThread(threading.Thread):
         # Epuisement des iterations
         fallback = " ".join(collected_text).strip()
         if fallback:
+            # Safety check meme sur le fallback
+            out_check = self.safety.check_output(fallback, identity)
+            if not out_check.passed:
+                return out_check.replacement
             return fallback + " (j'ai un peu bugge, mais j'ai retenu l'essentiel)"
         return "Desole, j'ai boucle trop longtemps sur mes outils. Reformule ?"
 
     def run(self):
-        # v2.0 : log Ollama au lieu d'Anthropic
         logger.info("Demarrage BrainThread (backend=%s, model=%s, host=%s)",
                     config.LLM_BACKEND, config.OLLAMA_MODEL,
                     getattr(config, "OLLAMA_HOST", "http://localhost:11434"))
+        logger.info("Safety filter actif (Phase 8.6)")
         summary = self.memory_mgr.counts_summary()
         logger.info("Memoires au demarrage : %s",
                     ", ".join(f"{k}={v}" for k, v in summary.items()))
