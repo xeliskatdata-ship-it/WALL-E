@@ -48,9 +48,9 @@ LLM_BACKEND                 = "ollama"
 OLLAMA_MODEL                = "qwen2.5:3b"
 OLLAMA_HOST                 = "http://localhost:11434"
 
-BRAIN_MAX_TOKENS            = 1024
+BRAIN_MAX_TOKENS            = 250
 BRAIN_MAX_TOOL_ITERATIONS   = 10
-BRAIN_MEMORY_TOP_K          = 5
+BRAIN_MEMORY_TOP_K          = 2
 BRAIN_MAX_CALLS_PER_HOUR    = 60
 MAX_RESPONSE_LEN            = 80
 
@@ -74,7 +74,7 @@ STT_ENABLED            = True
 STT_LANGUAGE           = 'fr-FR'
 STT_SAMPLE_RATE        = 16000
 STT_DEVICE             = None
-STT_SILENCE_THRESHOLD  = None
+STT_SILENCE_THRESHOLD  = 1500
 STT_SILENCE_DURATION   = 0.8
 STT_MAX_PHRASE         = 10
 

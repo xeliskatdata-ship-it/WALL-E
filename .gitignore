@@ -57,3 +57,5 @@ test_capture.wav
 test_mic.py
 test_stt_thread.py
 
+.venv311/
+.venv311/

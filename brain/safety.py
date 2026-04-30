@@ -163,21 +163,21 @@ def _redirection_mineur(display_name: str, categorie: str) -> str:
     base = f"Eh, {display_name}... ce que tu me dis la, c'est tres important. "
     if categorie == "idees_noires":
         return (base + "Je veux pas que tu sois seul(e) avec ca. Tu peux aller "
-                "voir Kat ou Brice tout de suite ? Eux, ils sauront t'aider "
+                "voir tes parents tout de suite ? Eux, ils sauront t'aider "
                 "vraiment. Je suis la, mais c'est eux qu'il te faut pour ca.")
     if categorie == "violence_subie":
         return (base + "Personne n'a le droit de te faire du mal. Va parler a "
-                "Kat ou Brice maintenant, dis-leur exactement ce que tu m'as "
+                "tes parents maintenant, dis-leur exactement ce que tu m'as "
                 "dit. Ils vont s'en occuper, c'est leur role et ils t'aiment.")
     if categorie == "harcelement":
-        return (base + "C'est dur ce que tu vis. Tu devrais en parler a Kat ou "
-                "Brice, ou a une maitresse / un maitre en qui tu as confiance. "
+        return (base + "C'est dur ce que tu vis. Tu devrais en parler a tes parents, "
+                "ou a une maitresse / un maitre en qui tu as confiance. "
                 "Tu n'es pas seul(e), et il y a des solutions.")
     if categorie == "automutilation":
-        return (base + "Je m'inquiete pour toi. Va voir Kat ou Brice tout de "
+        return (base + "Je m'inquiete pour toi. Va voir tes parents tout de "
                 "suite et dis-leur, ne reste pas seul(e) avec ca. Ils t'aiment "
                 "et ils trouveront comment t'aider.")
-    return (base + "Va parler a Kat ou Brice, c'est important. Ils sauront "
+    return (base + "Va parler a tes parents, c'est important. Ils sauront "
             "t'aider mieux que moi.")
 
 
@@ -219,7 +219,7 @@ def _replacement_block_output(display_name: str, categorie: str) -> str:
     # Message neutre qui evite le sujet et redirige vers les parents.
     return (f"Pardon {display_name}, c'est pas un sujet sur lequel je peux "
             "discuter avec toi. Si t'as une question la-dessus, c'est mieux "
-            "d'en parler a Kat ou Brice, ils sauront t'expliquer comme il faut.")
+            "d'en parler a tes parents, ils sauront t'expliquer comme il faut.")
 
 
 # === API PUBLIQUE ===

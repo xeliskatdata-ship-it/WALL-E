@@ -131,7 +131,7 @@ PROBLEMATIC_OUTPUTS = [
 
 # Reponses LLM neutres ou positives qui NE DOIVENT PAS etre interceptees
 NEUTRAL_OUTPUTS = [
-    "Salut Ambre ! Aujourd'hui on dessine ?",
+    "Salut, ca te dit qu'on dessine aujourd'hui ?",
     "Ton chat doit etre tres mignon, raconte-moi.",
     "L'ecole c'est comment cette semaine ?",
     "Les oiseaux qui volent dans le ciel, c'est magnifique.",
@@ -256,7 +256,7 @@ def test_distress_messages_role_aware():
 
     r_child = safety.check_input(text, child)
     assert not r_child.passed
-    assert "Kat" in r_child.replacement or "Brice" in r_child.replacement, \
+    assert "parent" in r_child.replacement.lower(), \
         "Mineur doit etre redirige vers les parents"
     logger.info("  Mineur -> parents .......... OK")
 
