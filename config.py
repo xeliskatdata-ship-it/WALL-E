@@ -79,8 +79,8 @@ STT_ENABLED            = True
 STT_LANGUAGE           = 'fr-FR'
 STT_SAMPLE_RATE        = 16000
 STT_DEVICE             = None
-STT_SILENCE_THRESHOLD  = 1500
-STT_SILENCE_DURATION   = 0.8
+STT_SILENCE_THRESHOLD  = 700   # ancien : 1500
+STT_SILENCE_DURATION   = 0.7
 STT_MAX_PHRASE         = 10
 
 # === AUTONOMIE (Phase 8.7 v2.0) ===
