@@ -2,11 +2,13 @@
 # v2.0 : migration full Ollama via brain/llm_client.py
 # v2.2 : integration de la couche safety deterministe (Phase 8.6)
 # v2.3 : injection de l'emotion detectee dans le system prompt (Phase 8.4)
+# v2.4 : log de perf par tour + mode degrade Ollama propre + acces WORLD pour tools physiques
 
 import json
 import logging
 import threading
-from queue import Empty, Queue
+import time
+from queue import Empty
 
 from brain.llm_client import OllamaClient
 
@@ -114,8 +116,11 @@ class BrainThread(threading.Thread):
         tools = filter_tools_for(identity)
 
         collected_text = []
+        turn_t0 = time.perf_counter()
 
         for iteration in range(config.BRAIN_MAX_TOOL_ITERATIONS):
+            # v2.4 : timing par iteration + mode degrade propre si Ollama injoignable
+            iter_t0 = time.perf_counter()
             try:
                 resp = _get_client().messages.create(
                     model=config.OLLAMA_MODEL,
@@ -125,11 +130,17 @@ class BrainThread(threading.Thread):
                     messages=history,
                 )
             except Exception as e:
-                logger.exception("Erreur appel LLM : %s", e)
-                history.pop()
-                return (f"Oups, j'arrive pas a joindre mon cerveau local "
-                        f"(Ollama). Verifie que le service tourne. ({e})")
+                iter_dt = time.perf_counter() - iter_t0
+                logger.exception("Ollama KO apres %.2fs : %s : %s",
+                                 iter_dt, type(e).__name__, e)
+                # on retire le user_input pour ne pas accumuler de tours fantomes
+                if history and history[-1]["role"] == "user":
+                    history.pop()
+                # message vivant plutot qu'un dump d'exception
+                return ("Pardon, j'arrive pas a joindre mon cerveau local la "
+                        "tout de suite. Tu veux retenter dans 2 secondes ?")
 
+            iter_dt = time.perf_counter() - iter_t0
             history.append({"role": "assistant", "content": resp.content})
 
             iteration_text = "".join(
@@ -138,9 +149,10 @@ class BrainThread(threading.Thread):
             if iteration_text:
                 collected_text.append(iteration_text)
 
-            logger.debug("Tour [%s] iter %d : stop=%s, texte=%r, tokens_out=%d",
-                         identity.user_id, iteration + 1, resp.stop_reason,
-                         iteration_text[:80], resp.usage.output_tokens)
+            logger.info("Tour [%s] iter %d : %.2fs stop=%s tokens_out=%d texte=%r",
+                        identity.user_id, iteration + 1, iter_dt,
+                        resp.stop_reason, resp.usage.output_tokens,
+                        iteration_text[:80])
 
             if resp.stop_reason != "tool_use":
                 final = " ".join(collected_text).strip()
@@ -157,6 +169,10 @@ class BrainThread(threading.Thread):
                         history.pop()
                     return out_check.replacement
 
+                # v2.4 : log de fin de tour
+                turn_dt = time.perf_counter() - turn_t0
+                logger.info("Tour [%s] FIN : %.2fs total, %d iter",
+                            identity.user_id, turn_dt, iteration + 1)
                 return final
 
             # Tool use : execute avec ACL
@@ -165,12 +181,16 @@ class BrainThread(threading.Thread):
                 if block.type == "tool_use":
                     logger.info("Tool [%s] : %s(%s)",
                                 identity.user_id, block.name, block.input)
+                    tool_t0 = time.perf_counter()
                     out = execute_tool(
                         name=block.name,
                         args=block.input,
                         identity=identity,
                         memory_mgr=self.memory_mgr,
                     )
+                    tool_dt = time.perf_counter() - tool_t0
+                    logger.info("Tool [%s] %s -> %.3fs",
+                                identity.user_id, block.name, tool_dt)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -179,7 +199,11 @@ class BrainThread(threading.Thread):
 
             history.append({"role": "user", "content": tool_results})
 
+        # plafond iterations atteint
         fallback = " ".join(collected_text).strip()
+        turn_dt = time.perf_counter() - turn_t0
+        logger.warning("Tour [%s] PLAFOND iter atteint apres %.2fs",
+                       identity.user_id, turn_dt)
         if fallback:
             out_check = self.safety.check_output(fallback, identity)
             if not out_check.passed:
@@ -194,6 +218,16 @@ class BrainThread(threading.Thread):
         logger.info("Safety filter actif (Phase 8.6)")
         if self.face_q is not None:
             logger.info("Emotion injection active (Phase 8.4)")
+        # v2.4 : log de l'etat physique au boot
+        try:
+            from brain.world_state import WORLD
+            if WORLD.is_ready():
+                logger.info("WORLD pret : Arduino + capteurs accessibles aux tools")
+            else:
+                logger.warning("WORLD non initialise : tools physiques (move, get_distances) indisponibles")
+        except ImportError:
+            logger.debug("brain.world_state pas dispo (OK si pas de hardware)")
+
         summary = self.memory_mgr.counts_summary()
         logger.info("Memoires au demarrage : %s",
                     ", ".join(f"{k}={v}" for k, v in summary.items()))

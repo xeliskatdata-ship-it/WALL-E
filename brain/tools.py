@@ -1,10 +1,13 @@
 # brain/tools.py - Outils exposes au LLM avec ACL par identite
 # v2.0 : web_search retire (mode 100% offline).
 # v2.1 : _CHILD_NAMES calcule dynamiquement depuis config.USERS pour pseudonymisation.
+# v2.4 : Phase 17 - ajout get_distances (lecture ToF + ultrason) et move (Mecanum).
+#        Acces aux tools physiques via brain.world_state.WORLD (singleton).
 
 import logging
 
 import config
+from brain.world_state import WORLD
 
 logger = logging.getLogger("walle.tools")
 
@@ -18,6 +21,15 @@ def _get_child_names() -> list:
 
 # Liste calculee au chargement du module
 _CHILD_NAMES = _get_child_names()
+
+
+# v2.4 : directions valides pour le tool move (cale sur modules/motors.py)
+_MOVE_DIRECTIONS = [
+    "forward", "backward",
+    "strafe_left", "strafe_right",
+    "rotate_left", "rotate_right",
+    "stop",
+]
 
 
 TOOLS_ALL = [
@@ -85,6 +97,49 @@ TOOLS_ALL = [
             "required": ["child_name", "query"],
         },
     },
+    # === v2.4 : capteurs physiques + mobilite ===
+    {
+        "name": "get_distances",
+        "description": (
+            "Lit les distances aux obstacles en cm. Retourne 4 valeurs : ToF gauche/centre/"
+            "droite (jusqu'a 4m) + ultrason avant (jusqu'a 2m). 'None' si capteur HS ou hors "
+            "portee. A appeler AVANT tout 'move forward' pour verifier l'espace devant toi. "
+            "Outil sans risque, lecture seule, accessible a tous (sauf inconnus)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "move",
+        "description": (
+            "Deplace WALL-E. 7 directions : forward, backward, strafe_left, strafe_right, "
+            "rotate_left, rotate_right, stop. Intensity 0-100 (defaut 50 = prudent salon, "
+            "80+ = espaces vides). RESERVE aux membres de la famille (parents et enfants), "
+            "pas aux invites ni aux inconnus. L'Arduino refuse automatiquement d'avancer si "
+            "un obstacle est detecte a moins de 15cm devant : la reponse contient alors "
+            "'obstacle_detected', il faut alors reculer ou tourner."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": _MOVE_DIRECTIONS,
+                    "description": "Direction du mouvement",
+                },
+                "intensity": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "default": 50,
+                    "description": "Vitesse 0..100 (plafonnee par duty_cap cote firmware Mega)",
+                },
+            },
+            "required": ["direction"],
+        },
+    },
 ]
 
 
@@ -103,7 +158,7 @@ def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
         logger.warning("ACL refus : user=%s tente %s", identity.user_id, name)
         return {
             "error": f"Outil '{name}' non autorise pour {identity.display_name}. "
-                     f"Cet outil est reserve aux parents."
+                     f"Cet outil est reserve a certains roles."
         }
 
     try:
@@ -133,6 +188,30 @@ def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
             logger.info("search_child_memory [%s -> %s] : %d resultats",
                         identity.user_id, child, len(docs))
             return {"child": child, "results": docs, "count": len(docs)}
+
+        # === v2.4 : tools physiques ===
+        if name == "get_distances":
+            d = WORLD.get_distances()
+            logger.info("get_distances [%s] -> L=%s C=%s R=%s U=%s",
+                        identity.user_id,
+                        d.get("tof_left_cm"), d.get("tof_center_cm"),
+                        d.get("tof_right_cm"), d.get("ultrasound_front_cm"))
+            return d
+
+        if name == "move":
+            if not WORLD.is_ready():
+                return {"error": "robot pas pret (Arduino non initialise au boot)"}
+            direction = args.get("direction", "stop")
+            intensity = int(args.get("intensity", 50))
+            ok, msg = WORLD.move(direction, intensity)
+            logger.info("move [%s] %s i=%d -> ok=%s (%s)",
+                        identity.user_id, direction, intensity, ok, msg)
+            return {
+                "status": "ok" if ok else "error",
+                "msg": msg,
+                "direction": direction,
+                "intensity": intensity,
+            }
 
         return {"error": f"outil inconnu : {name}"}
 

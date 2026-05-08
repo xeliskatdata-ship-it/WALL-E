@@ -2,10 +2,13 @@
 # Utilise Mediapipe FaceMesh (468 landmarks) + heuristiques géométriques.
 # v2 (Phase 8.4 fix) : refactor _compute_smile_score + _compute_brow_distance + _detect_emotion
 # avec seuils calibres sur des donnees reelles webcam.
+# v2.4 (Phase 17) : abstraction camera cross-platform Pi 5 (picamera2) / Windows (cv2).
+# La logique FaceMesh + emotion est INTOUCHEE, seule l'ouverture/lecture du flux change.
 
 import time
 import threading
 import logging
+import platform
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -243,6 +246,90 @@ class EmotionSmoother:
 
 
 # ---------------------------------------------------------------
+# v2.4 : Couche d'abstraction camera cross-platform
+# ---------------------------------------------------------------
+# Sur Pi 5 + Module 3 Wide, cv2.VideoCapture(0) ne marche pas : libcamera/picamera2
+# est obligatoire. Sur Windows / webcam USB, cv2 reste la meilleure option.
+# Les 2 wrappers exposent la meme API : .read() -> (ok, frame_bgr), .release(), .isOpened()
+
+
+class _Picamera2Capture:
+    """Wrapper picamera2 qui retourne du BGR pour rester compat avec le pipeline cv2."""
+    def __init__(self, width, height):
+        from picamera2 import Picamera2   # import differe : pas dispo sur Windows
+        self._cam = Picamera2()
+        cfg = self._cam.create_video_configuration(
+            main={"size": (width, height), "format": "RGB888"}
+        )
+        self._cam.configure(cfg)
+        self._cam.start()
+        time.sleep(0.5)   # warm-up auto-expose
+        self._opened = True
+
+    def read(self):
+        try:
+            arr = self._cam.capture_array()           # RGB
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return True, bgr
+        except Exception as e:
+            logger.debug("picamera2 read KO : %s", e)
+            return False, None
+
+    def release(self):
+        try:
+            self._cam.stop()
+        except Exception:
+            pass
+        self._opened = False
+
+    def isOpened(self):
+        return self._opened
+
+
+class _CV2Capture:
+    """Wrapper cv2.VideoCapture (Windows / webcam USB / Linux non-Pi)."""
+    def __init__(self, index, width=None, height=None, fps=None):
+        # Sur Windows, CAP_DSHOW evite les warnings et certains soucis d'init
+        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else 0
+        self._cap = cv2.VideoCapture(index, backend)
+        if width:  self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        if height: self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if fps:    self._cap.set(cv2.CAP_PROP_FPS, fps)
+
+    def read(self):
+        return self._cap.read()
+
+    def release(self):
+        self._cap.release()
+
+    def isOpened(self):
+        return self._cap.isOpened()
+
+
+def _open_camera():
+    """Ouvre la camera selon la plateforme. Retourne un wrapper ou None si echec."""
+    width  = getattr(config, "CAMERA_WIDTH",  1280)
+    height = getattr(config, "CAMERA_HEIGHT", 720)
+    fps    = getattr(config, "CAMERA_FPS",    30)
+    is_pi  = getattr(config, "IS_RASPBERRY_PI", False)
+
+    if is_pi:
+        try:
+            cam = _Picamera2Capture(width, height)
+            logger.info("Camera : backend picamera2 (%dx%d)", width, height)
+            return cam
+        except Exception as e:
+            logger.warning("picamera2 KO (%s), tentative fallback cv2 (peu probable de marcher sur Pi 5 + Module 3)", e)
+
+    cam = _CV2Capture(config.CAMERA_INDEX, width, height, fps)
+    if not cam.isOpened():
+        logger.error("cv2.VideoCapture KO sur index=%d", config.CAMERA_INDEX)
+        return None
+    logger.info("Camera : backend cv2 (index=%d, %dx%d)", config.CAMERA_INDEX, width, height)
+    return cam
+
+
+# ---------------------------------------------------------------
 # Thread vision
 # ---------------------------------------------------------------
 class VisionThread(threading.Thread):
@@ -258,9 +345,9 @@ class VisionThread(threading.Thread):
 
     def run(self):
         logger.info("Démarrage du thread vision")
-        cap = cv2.VideoCapture(config.CAMERA_INDEX)
-        if not cap.isOpened():
-            logger.error("Impossible d'ouvrir la caméra (index %d)", config.CAMERA_INDEX)
+        cap = _open_camera()
+        if cap is None:
+            logger.error("Impossible d'ouvrir la caméra (cv2 et picamera2 indisponibles)")
             return
 
         # Init FaceMesh

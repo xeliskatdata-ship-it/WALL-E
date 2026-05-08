@@ -2,6 +2,9 @@
 # v1.1 modele B : famille ouverte + intimite couple
 # v2.0 : web_search retire (mode 100% offline). search_child_memory reste reserve parents.
 # Phase 8.3+ : remplacement de la detection par reconnaissance vocale (Resemblyzer)
+# v2.4 : Phase 17 - ajout role 'guest' + ACL get_distances/move :
+#        - get_distances : tous sauf unknown (lecture seule, sans risque)
+#        - move          : parents + enfants uniquement (pas guest, pas unknown)
 
 import re
 import logging
@@ -15,10 +18,15 @@ logger = logging.getLogger("walle.identity")
 
 
 # Mapping role -> outils autorises
-# v2.0 : web_search retire pour tous (Ollama 100% offline, pas d'internet)
+# v2.4 :
+#   - guest a son propre set (lecture capteurs autorisee, mouvement non)
+#   - parent et child gagnent get_distances + move
 _TOOLS_BY_ROLE = {
-    "parent":  {"save_memory", "search_memory", "search_child_memory"},
-    "child":   {"save_memory", "search_memory"},
+    "parent":  {"save_memory", "search_memory", "search_child_memory",
+                "get_distances", "move"},
+    "child":   {"save_memory", "search_memory",
+                "get_distances", "move"},
+    "guest":   {"get_distances"},          # v2.4 : invites peuvent demander la distance, pas bouger
     "unknown": set(),
 }
 
@@ -27,7 +35,7 @@ _TOOLS_BY_ROLE = {
 class Identity:
     user_id: str
     display_name: str
-    role: str                           # "parent" / "child" / "unknown"
+    role: str                           # "parent" / "child" / "guest" / "unknown"
     age: Optional[int] = None
     tools_allowed: set = field(default_factory=set)
     can_write_family: bool = False
@@ -43,12 +51,17 @@ class Identity:
 
         info = config.USERS[uid]
         role = info["role"]
+        # safety : si family_local declare un role inattendu, on retombe sur unknown ACL
+        tools = _TOOLS_BY_ROLE.get(role, set())
+        if role not in _TOOLS_BY_ROLE:
+            logger.warning("Role inconnu '%s' pour user_id '%s' -> ACL unknown", role, uid)
+
         return cls(
             user_id=uid,
-            display_name=info["display_name"],
+            display_name=info.get("display_name", uid),
             role=role,
-            age=_compute_age(info["dob"]),
-            tools_allowed=_TOOLS_BY_ROLE[role],
+            age=_compute_age(info["dob"]) if info.get("dob") else None,
+            tools_allowed=tools,
             can_write_family=(role == "parent"),
         )
 
@@ -68,6 +81,10 @@ class Identity:
 
     def is_parent(self) -> bool:
         return self.role == "parent"
+
+    def is_family(self) -> bool:
+        # v2.4 : helper pratique pour le brain (autorisations move, etc.)
+        return self.role in ("parent", "child")
 
 
 def _compute_age(dob_iso: str) -> int:

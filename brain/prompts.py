@@ -3,6 +3,7 @@
 # v2.3 : Phase 8.4 - injection de l'emotion detectee dans le system prompt.
 # v2.3.1 : BASE_PERSONA resserre pour modeles locaux 3B (qwen2.5:3b)
 # v2.3.2 : retrouve la personnalite taquine sans casser les regles strictes
+# v2.4 : Phase 17 - bloc PHYSICAL_CONTEXT pour les tools get_distances et move
 
 try:
     from brain.personas_local import OVERLAYS
@@ -134,6 +135,31 @@ def _build_emotion_block(emotion_data, display_name: str) -> str:
     ).strip()
 
 
+# === v2.4 PHASE 17 : CORPS PHYSIQUE ===
+
+PHYSICAL_CONTEXT = """
+TON CORPS PHYSIQUE :
+Tu n'es pas qu'un programme, tu as un vrai corps. A tout instant tu peux :
+
+- Mesurer les distances avec 4 capteurs (3 lasers ToF gauche/centre/droite + 1 ultrason avant)
+  via l'outil get_distances. Lecture seule, sans risque.
+- Te deplacer en Mecanum (4 roues) via l'outil move. 7 directions :
+  forward, backward, strafe_left, strafe_right, rotate_left, rotate_right, stop.
+  Intensity 0..100 (defaut 50 = prudent salon, 80+ = espaces vides uniquement).
+
+REGLE D'OR DU MOUVEMENT :
+Avant tout 'move forward', appelle d'abord 'get_distances' pour verifier que rien
+n'est a moins de 30cm devant toi. Si tu fonces malgre tout, l'Arduino te bloquera
+en dessous de 15cm (reponse 'obstacle_detected') et tu devras reculer ou tourner.
+
+LIMITES A CONNAITRE :
+- Si l'outil 'move' n'apparait PAS dans tes outils disponibles, c'est que ton interlocuteur
+  n'a pas le droit de te faire bouger (invite ou inconnu). Explique-le gentiment.
+- Les capteurs peuvent renvoyer 'None' (None = capteur HS ou hors portee). Considere alors
+  que tu ne sais pas et joue la prudence (intensity basse, ou demande a un humain).
+"""
+
+
 MEMORIES_CONTEXT = """
 CONTEXTE LONG TERME (a utiliser UNIQUEMENT si la question actuelle s'y rapporte) :
 
@@ -174,6 +200,13 @@ def build_system_prompt(identity, allowed_tools_desc: str,
     emotion_block = _build_emotion_block(emotion_data, identity.display_name)
     if emotion_block:
         parts.append(emotion_block)
+
+    # v2.4 : ajoute le bloc corps pour tout user non-unknown qui a au moins 1 tool physique
+    has_physical_tools = any(
+        t in identity.tools_allowed for t in ("get_distances", "move")
+    )
+    if has_physical_tools:
+        parts.append(PHYSICAL_CONTEXT.strip())
 
     parts.append(TOOLS_CONTEXT.format(allowed_tools=allowed_tools_desc).strip())
 
