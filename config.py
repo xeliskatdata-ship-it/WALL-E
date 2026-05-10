@@ -48,7 +48,7 @@ TCA_ADDRESS          = 0x70               # GERUI a 0x70 ; 2eme TCA en reserve a
 TOF_CHANNELS         = {                  # canaux mux -> position physique
     "left":   0,
     "center": 1,
-    "right":  2,
+    "right":  3,    # canal 2 PCA HS, contournement sur canal 3
 }
 TOF_TIMING_BUDGET_MS = 50                 # 50ms = compromis precision/refresh
 TOF_RANGE_MODE       = "long"             # short / medium / long (4m max)
