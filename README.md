@@ -125,12 +125,34 @@ python -m tests.test_sensors --live-arduino
 
 ### Phase F — Bring-up capteurs ToF
 
+**Convention de câblage** (à respecter sur tout le projet) :
+- Rouge = 3.3V (VIN)
+- Noir = GND
+- Jaune = SDA
+- Bleu = SCL
+
+**Pré-requis breadboard** : sur les breadboards 830 trous, les rails d'alimentation sont coupés vers la colonne 30. **Toujours poser 2 ponts M-M** pour relier les 2 moitiés du rail rouge et du rail bleu **avant** de câbler quoi que ce soit. Sinon les composants côté gauche du rail seront sans alim. Vérifier au multimètre.
+
+**Procédure validée le 10/05/2026** (PCA9548A à 0x70, 3 VL53L1X) :
+
 ```bash
-# Câbler 1 seul VL53L1X d'abord (canal 0 du TCA9548A)
-i2cdetect -y 1               # doit montrer 0x70
+# 1. Vérifier que le PCA9548A est détecté sur le bus principal
+i2cdetect -y 1                # doit montrer 0x70
+
+# 2. Activer chaque canal et vérifier que le VL53L1X répond à 0x29
+for mask in 0x01 0x02 0x04; do  # canaux 0, 1, 2
+  echo "=== mask $mask ==="
+  i2cset -y 1 0x70 $mask
+  i2cdetect -y 1               # doit montrer 0x29
+done
+i2cset -y 1 0x70 0x00          # reset mux
+
+# 3. Lecture en live des 3 capteurs simultanément
 python -m tests.test_sensors --live-tof
-# Puis ajouter capteurs sur canaux 1 et 2
+# Doit afficher 5 cycles avec L, C, R remplis (pas de None)
 ```
+
+**Diagnostic en cas de canal PCA muet** : si `0x29` n'apparaît jamais sur un canal donné quel que soit le capteur branché, **le canal du PCA est probablement HS** (soudure froide ou piste endommagée). Le PCA9548A a 8 canaux, contourner sur un canal libre. Ne pas oublier de modifier `TOF_CHANNELS` dans `config.py` en conséquence.
 
 ### Phase G — Lancement complet
 
@@ -157,7 +179,7 @@ Décisions verrouillées :
 | Capteurs ToF | Tool LLM `get_distances()` (lecture seule, accessible à tous sauf unknown) |
 | Mouvement | Tool LLM `move(direction, intensity)` (parents + enfants uniquement) |
 | Vision | Auto-détection Pi (picamera2) / Windows (cv2) |
-| TCA9548A | 0x70, canaux 0/1/2 = G/C/D |
+| TCA9548A / PCA9548A | 0x70, canaux 0/1/3 = G/C/D (canal 2 abandonné sur l'unité actuelle, voir BACKLOG) |
 | Duty boot | 60% (débridable runtime via `motors.set_duty_cap`) |
 | Watchdog moteurs | 1s |
 | Obstacle stop | < 15cm avec moteurs en avant (override Arduino) |
@@ -204,6 +226,10 @@ Décisions verrouillées :
 | `import board: No module named 'lgpio'` | `pip install lgpio` (dep manquante adafruit-blinka 9.x sur Pi 5) |
 | Arduino : `I2Cdev.h: No such file or directory` | Library Manager → installer MPU6050 by Electronic Cats avec ses dépendances |
 | Password SSH ne passe pas | password tapé "à l'aveugle" (Linux n'affiche rien), réessayer une fois lentement |
+| Capteur ToF répond à `i2cdetect` mais `--live-tof` échoue avec "No I2C device" ou "Errno 121" | Connexion électrique marginale : le ping basique passe mais l'init complète échoue. Remplacer les fils dupont du capteur, vérifier les soudures, replanter sur des trous frais |
+| Pas de 3.3V côté gauche du rail breadboard | Rails coupés à la colonne ~30 — poser un pont M-M pour relier les 2 moitiés du rail (idem pour le rail GND) |
+| Un canal du PCA9548A reste muet quel que soit le capteur branché | Canal défectueux côté PCA (soudure froide ou piste HS). Contourner sur un canal libre (8 dispo) et mettre à jour `TOF_CHANNELS` dans `config.py` |
+| Fil dupont avec contact intermittent | Pince métallique interne déformée après ~10 manipulations — remplacer par un fil neuf |
 
 ## Roadmap
 
@@ -211,12 +237,13 @@ Décisions verrouillées :
 - [x] Phase 17b — Mecanum 4 moteurs avec safety obstacle
 - [x] Phase 17c — bring-up Pi 5 + flash Mega + comm série validée (session 09/05/26)
 - [ ] Phase 18 — câblage capteurs : pinout TB6612 confirmé visuellement + 3 ToF via TCA opérationnels
+  - Sous-statut au 10/05/26 : 2/3 ToF validés (canal 0 + canal 1). VL #3 instable, reporté en Phase F.1 (cf. BACKLOG)
 - [ ] Phase 19 — calibration MPU6050 offsets (au repos une fois monté)
 - [ ] Phase 20 — tests d'endurance thermique > 30 min
 - [ ] Phase 21 — wake word + autonomie batterie 18650
 - [ ] Phase 22 — bras servos (DS3218/MG996R), à recommander
 
-## Documentation complémentaire
+## Documentation complémentaire à titre perso : 
 
-- **`BACKLOG.md`** — dettes techniques connues (picamera2 venv, mediapipe Python 3.13, faux positif TCA9548A dans bringup_check)
+- **`BACKLOG.md`** — dettes techniques connues (picamera2 venv, mediapipe Python 3.13, faux positif TCA9548A dans bringup_check, PCA9548A canal 2 HS, VL #3 à stabiliser Phase F.1)
 - **`docs/RECAP_SESSION_*.md`** — historique chronologique des sessions de bring-up et décisions techniques
