@@ -192,10 +192,10 @@ def execute_tool(name: str, args: dict, identity, memory_mgr) -> dict:
         # === v2.4 : tools physiques ===
         if name == "get_distances":
             d = WORLD.get_distances()
-            logger.info("get_distances [%s] -> L=%s C=%s R=%s U=%s",
+            logger.info("get_distances [%s] -> L=%s R=%s U=%s",
                         identity.user_id,
-                        d.get("tof_left_cm"), d.get("tof_center_cm"),
-                        d.get("tof_right_cm"), d.get("ultrasound_front_cm"))
+                        d.get("tof_left_cm"), d.get("tof_right_cm"), 
+                        d.get("ultrasound_front_cm"))
             return d
 
         if name == "move":

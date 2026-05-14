@@ -28,8 +28,8 @@ class WorldState:
     # === API exposee aux tools ===
 
     def get_distances(self) -> dict:
-        # vue combinee ToF (3 points G/C/D) + ultrason avant. None si capteur HS.
-        tof = self._tof.read_all() if self._tof else {"left": None, "center": None, "right": None}
+        # v2.5 : 2 capteurs ToF (G/D) + ultrason avant. None si capteur HS.
+        tof = self._tof.read_all() if self._tof else {"left": None, "right": None}
         us = None
         age = None
         if self._arduino:
@@ -37,7 +37,6 @@ class WorldState:
             us = state.get("u") if state else None
         return {
             "tof_left_cm":          tof.get("left"),
-            "tof_center_cm":        tof.get("center"),
             "tof_right_cm":         tof.get("right"),
             "ultrasound_front_cm":  us,
             "sensor_age_s":         round(age, 2) if age is not None else None,
