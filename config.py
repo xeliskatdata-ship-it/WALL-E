@@ -47,7 +47,6 @@ OLED_HEIGHT       = 64
 TCA_ADDRESS          = 0x70               # GERUI a 0x70 ; 2eme TCA en reserve a 0x71
 TOF_CHANNELS         = {                  # canaux mux -> position physique
     "left":   0,
-    "center": 1,
     "right":  3,    # canal 2 PCA HS, contournement sur canal 3
 }
 TOF_TIMING_BUDGET_MS = 50                 # 50ms = compromis precision/refresh
