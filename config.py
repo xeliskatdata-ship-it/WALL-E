@@ -90,7 +90,7 @@ LLM_BACKEND                 = "ollama"
 OLLAMA_MODEL                = "qwen2.5:7b"      # v2.4 : 3b -> 7b sur Pi 5 16Go
 OLLAMA_HOST                 = "http://localhost:11434"
 # v2.4 : tuning Ollama Pi 5 (qwen2.5:7b ~4.5GB en RAM, 4 cores Pi 5)
-OLLAMA_TIMEOUT              = 60                # 7b plus lent que 3b, marge confortable
+OLLAMA_TIMEOUT              = 180                # 7b plus lent que 3b, marge confortable
 OLLAMA_NUM_CTX              = 4096              # contexte large pour tool use + memoire
 OLLAMA_NUM_THREAD           = 4                 # 4 cores Pi 5
 

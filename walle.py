@@ -6,6 +6,8 @@
 # v2.4 : Phase 8.3 reste - lance AudioThread (TTS + filtre robot)
 # v2.4 Phase 17 : init hardware (ArduinoBridge + ToFSensors + Motors) attache a WORLD,
 #                 avec --no-hardware pour tester en local sans Mega.
+# v2.5 : pre-warm Ollama au boot (eteint P2 cold start ~57s, voir brain/prewarm.py).
+#        OLLAMA_TIMEOUT bumpe a 180s pour marge sur appels gros contexte.
 
 import argparse
 import logging
@@ -28,12 +30,13 @@ logger = logging.getLogger("walle")
 from brain.agent import BrainThread
 from brain.identity import Identity, parse_prefix
 from brain.world_state import WORLD
+from brain.prewarm import warmup_ollama   # v2.5 : evite cold start 57s sur 1er appel brain
 
 
 def print_welcome(current_user, stt_enabled, vision_enabled, tts_enabled, hw_state):
     print()
     print("=" * 60)
-    title = "  WALL-E reveille - v2.4 (Ollama offline, multi-user)"
+    title = "  WALL-E reveille - v2.5 (Ollama offline + pre-warm, multi-user)"
     if stt_enabled:    title += " + STT"
     if vision_enabled: title += " + Vision"
     if tts_enabled:    title += " + Voix"
@@ -165,7 +168,7 @@ def shutdown_hardware(arduino, tof, motors):
 def main():
     default_user = getattr(config, "DEFAULT_USER", "parent_1")
 
-    parser = argparse.ArgumentParser(description="WALL-E v2.4 multi-user + STT + Vision + TTS")
+    parser = argparse.ArgumentParser(description="WALL-E v2.5 multi-user + STT + Vision + TTS")
     parser.add_argument("--user", type=str, default=default_user,
                         help=f"Locuteur par defaut (defaut : {default_user})")
     parser.add_argument("--no-stt", action="store_true",
@@ -179,7 +182,17 @@ def main():
     # v2.4 Phase 17 : flag dev pour tourner sans Arduino branche
     parser.add_argument("--no-hardware", action="store_true",
                         help="Desactive Arduino + capteurs ToF + motors (test sans hardware)")
+    # v2.5 : skip pre-warm pour dev rapide (si Ollama deja chaud d'une session precedente)
+    parser.add_argument("--no-prewarm", action="store_true",
+                        help="Skip le pre-warm Ollama (utile si modele deja en RAM)")
     args = parser.parse_args()
+
+    # v2.5 : Pre-warm Ollama AVANT toute init hardware/threads.
+    # Cold load qwen2.5:7b ~57s sur Pi 5, sinon 1er appel brain timeout.
+    # keep_alive=-1 -> reste chaud pour toute la session.
+    if not args.no_prewarm:
+        if not warmup_ollama():
+            logger.warning("Ollama prewarm KO -> brain demarre en degraded, 1er appel risque 60s+")
 
     current_identity = Identity.from_user_id(args.user)
     if current_identity.user_id == "unknown":
