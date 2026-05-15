@@ -7,6 +7,12 @@
 opencv-python-headless>=4.9
 onnxruntime>=1.26
 numpy>=1.26
+# NOTE Pi 5 : python3-picamera2 doit etre installe via APT (paquet systeme).
+# Pour que le venv y accede, soit le creer avec --system-site-packages :
+#     python3 -m venv --system-site-packages .venv
+# Soit modifier un venv existant :
+#     sudo apt install python3-picamera2
+#     sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' .venv/pyvenv.cfg
 
 # Phase 3 : Moteurs (v2.4 : ACTIVE - lien serie Mega 2560)
 pyserial>=3.5
@@ -49,7 +55,6 @@ sounddevice>=0.4.7
 
 # Phase 17 v2.4 : capteurs ToF VL53L1X via TCA9548A (Pi 5 uniquement)
 # Sur Windows ces libs s'installent mais ne sont pas utilisees (init paresseuse cote sensors_tof.py).
-# Sur Pi 5, prerequis : sudo apt install python3-picamera2 (paquet apt, PAS pip)
 adafruit-blinka>=8.20
 adafruit-circuitpython-vl53l1x>=1.1.10
 adafruit-circuitpython-tca9548a>=0.7.0
