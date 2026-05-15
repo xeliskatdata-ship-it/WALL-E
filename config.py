@@ -2,6 +2,7 @@
 # Modifier les valeurs ici, jamais en dur dans les modules.
 # v2.0 : full Ollama. v2.1 : pseudonymisation pour publication portfolio.
 # v2.4 (Phase 17) : Mecanum 4 moteurs + capteurs ToF + qwen2.5:7b sur Pi 5 16Go
+# v2.5 (post Phase F) : mediapipe -> OpenCV YuNet + FER+ ONNX. Dette P2 eteinte.
 #
 # IMPORTANT - REPO PUBLIC :
 # Les utilisateurs reels (prenoms + dates de naissance) sont charges depuis
@@ -17,6 +18,10 @@ import platform
 # v2.4 : avant CHROMA_PATH = "data/chroma" plantait quand walle.py etait lance
 # depuis un autre cwd (notamment via systemd). On ancre tout sur __file__.
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# v2.5 : path absolu vers les modeles ONNX (YuNet + FER+).
+# Fichiers DL via models/download_models.py, gitignored.
+MODELS_DIR = os.path.join(_BASE_DIR, "models")
 
 # === DETECTION PLATEFORME ===
 # v2.4 : utilise par modules/vision.py pour basculer picamera2 (Pi) vs cv2 (Windows)
@@ -55,20 +60,15 @@ TOF_RANGE_MODE       = "long"             # short / medium / long (4m max)
 # === VISION (Phase 2) ===
 VISION_FPS_TARGET     = 30
 VISION_SKIP_FRAMES    = 2
-VISION_MIN_CONFIDENCE = 0.5
+VISION_MIN_CONFIDENCE = 0.5               # v2.5 : devient score_threshold YuNet
 VISION_MAX_FACES      = 1
-# v2.4 : EMOTION_SMOOTHING etait defini ici ET plus bas - bug fix, on le garde une seule fois
-# (reste defini dans la section emotion)
 
-# === Seuils detection emotion (Phase 8.4 v2.1, calibres) ===
-MAR_OPEN_THRESHOLD          = 0.30
-EAR_HAPPY_MAX               = 0.25
-BROW_DROP_PAIN_THRESHOLD    = 0.45
-SMILE_SAD_THRESHOLD         = -0.050
-BROW_DROP_SAD_THRESHOLD     = 0.42
-EMOTION_MIN_SCORE           = 0.40
-EMOTION_SMOOTHING           = 5
-VISION_DEBUG_LOG            = True
+# === EMOTION (Phase 8.4 v2.5) - FER+ ONNX ===
+# v2.5 : Mediapipe FaceMesh + heuristiques (MAR/EAR/BROW/SMILE) remplaces par
+# FER+ ONNX (8 classes mappees vers 4 : neutral, happy, sad, pain).
+# Cf modules/vision.py - les seuils calibres FaceMesh ne sont plus utiles.
+EMOTION_SMOOTHING = 5
+VISION_DEBUG_LOG  = True
 
 # === AUDIO (Phase 7) ===
 VOSK_MODEL_PATH   = "assets/vosk-model-fr"

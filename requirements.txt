@@ -1,10 +1,11 @@
 # requirements.txt - WALL-E v2.0
 # Migration full Ollama : anthropic + duckduckgo retires.
 # v2.4 (Phase 17) : pyserial actif + Adafruit ToF/TCA pour capteurs distance.
+# v2.5 (post Phase F) : mediapipe -> OpenCV YuNet + FER+ ONNX. Dette P2 eteinte.
 
-# Phase 2 : Vision
+# Phase 2 : Vision (v2.5 - sans mediapipe, onnxruntime pour FER+)
 opencv-python-headless>=4.9
-mediapipe>=0.10
+onnxruntime>=1.26
 numpy>=1.26
 
 # Phase 3 : Moteurs (v2.4 : ACTIVE - lien serie Mega 2560)

@@ -1,9 +1,9 @@
-# modules/vision.py — Thread caméra : détection visage + émotion
-# Utilise Mediapipe FaceMesh (468 landmarks) + heuristiques géométriques.
-# v2 (Phase 8.4 fix) : refactor _compute_smile_score + _compute_brow_distance + _detect_emotion
-# avec seuils calibres sur des donnees reelles webcam.
-# v2.4 (Phase 17) : abstraction camera cross-platform Pi 5 (picamera2) / Windows (cv2).
-# La logique FaceMesh + emotion est INTOUCHEE, seule l'ouverture/lecture du flux change.
+# modules/vision.py - Thread camera : detection visage + emotion
+# v3 (Phase post-F) : refactor complet. Mediapipe ne fournit pas de wheel aarch64
+# sur PyPI/piwheels -> on degage la dette et on passe a OpenCV YuNet + FER+ ONNX.
+# Contrat preserve : FaceData identique, emotion in {neutral, happy, sad, pain},
+# VisionThread(face_q, stop_event) identique, wrappers camera intacts.
+# v3.1 : ajuste mapping surprise -> neutral apres smoke test webcam (faux positifs en lecture).
 
 import time
 import threading
@@ -11,264 +11,153 @@ import logging
 import platform
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
-import mediapipe as mp
+import onnxruntime as ort
 
 import config
 
 logger = logging.getLogger("walle.vision")
 
+
 # ---------------------------------------------------------------
-# Data classes
+# Data classes (contrat inchange v2 -> v3)
 # ---------------------------------------------------------------
 @dataclass
 class FaceData:
     """Une frame de detection visage + emotion lissee."""
     detected: bool
     emotion: str        # "neutral", "happy", "sad", "pain"
-    confidence: float   # Confiance détection visage (0–1)
+    confidence: float   # Confiance emotion (0-1), softmax max
     bbox: tuple = None  # (x, y, w, h) ou None
-    debug: dict = field(default_factory=dict)  # v2 : valeurs intermediaires pour debug
+    debug: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------
-# Indices landmarks FaceMesh (468 points)
+# Detection visage - YuNet (OpenCV 4.6+)
 # ---------------------------------------------------------------
-# Bouche
-_MOUTH_TOP      = 13     # Haut de la levre superieure
-_MOUTH_BOTTOM   = 14
-_MOUTH_LEFT     = 78
-_MOUTH_RIGHT    = 308
-_MOUTH_CORNER_L = 61
-_MOUTH_CORNER_R = 291
+class _YuNetDetector:
+    # YuNet est integre a OpenCV via cv2.FaceDetectorYN. Pas besoin de session ONNX manuelle,
+    # OpenCV gere tout en interne. Faster + plus compact que SSD-MobileNet pour ce use case.
 
-# Yeux
-_EYE_L_TOP    = 159
-_EYE_L_BOTTOM = 145
-_EYE_L_LEFT   = 33
-_EYE_L_RIGHT  = 133
-_EYE_R_TOP    = 386
-_EYE_R_BOTTOM = 374
-_EYE_R_LEFT   = 362
-_EYE_R_RIGHT  = 263
+    def __init__(self, model_path, score_threshold=0.6, nms_threshold=0.3):
+        self._detector = cv2.FaceDetectorYN.create(
+            model=str(model_path),
+            config="",
+            input_size=(320, 320),       # resize dynamique a chaque detect
+            score_threshold=score_threshold,
+            nms_threshold=nms_threshold,
+            top_k=5,                     # 5 visages max remontes (on en garde 1)
+        )
 
-# Sourcils — distance verticale pour tristesse
-_BROW_L_INNER  = 70
-_BROW_R_INNER  = 300
-_NOSE_TIP      = 4     # Référence stable pour normalisation
-
-# v2 : reference pour normaliser les distances par taille du visage
-_FACE_LEFT  = 234   # Tempe gauche
-_FACE_RIGHT = 454   # Tempe droite
-
-
-# ---------------------------------------------------------------
-# Fonctions utilitaires géométriques
-# ---------------------------------------------------------------
-def _dist(p1, p2):
-    """Distance euclidienne 2D entre deux landmarks."""
-    return np.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
-
-
-def _face_width(landmarks):
-    """v2 : largeur du visage pour normalisation. Stable peu importe la distance camera."""
-    return _dist(landmarks[_FACE_LEFT], landmarks[_FACE_RIGHT])
-
-
-def _compute_mar(landmarks):
-    """Mouth Aspect Ratio : hauteur bouche / largeur bouche.
-    Élevé = bouche ouverte / sourire large."""
-    top    = landmarks[_MOUTH_TOP]
-    bottom = landmarks[_MOUTH_BOTTOM]
-    left   = landmarks[_MOUTH_LEFT]
-    right  = landmarks[_MOUTH_RIGHT]
-    vertical   = _dist(top, bottom)
-    horizontal = _dist(left, right)
-    if horizontal < 1e-6:
-        return 0.0
-    return vertical / horizontal
-
-
-def _compute_smile_score(landmarks):
-    """v2 : score de sourire normalise par la largeur du visage.
-
-    Logique : on mesure la position verticale moyenne des coins de la bouche
-    par rapport au centre de la levre superieure, normalisee par la taille du visage.
-
-    Plus le retour est proche de 0 ou positif, plus c'est un sourire.
-    Plus c'est negatif, plus c'est neutre/moue.
-
-    Note : la valeur absolue varie selon la geometrie du visage. Le calibrage
-    se fait via des seuils relatifs (cf. config.SMILE_HAPPY_THRESHOLD).
-    """
-    top_center = landmarks[_MOUTH_TOP]
-    corner_l   = landmarks[_MOUTH_CORNER_L]
-    corner_r   = landmarks[_MOUTH_CORNER_R]
-    avg_corner_y = (corner_l.y + corner_r.y) / 2
-
-    # En image, axe Y vers le bas : sourire = coins plus hauts = corner.y < top.y
-    raw = top_center.y - avg_corner_y
-
-    # v2 : normalisation par largeur du visage
-    fw = _face_width(landmarks)
-    if fw < 1e-6:
-        return 0.0
-    return raw / fw
-
-
-def _compute_ear(landmarks):
-    """Eye Aspect Ratio moyen (gauche + droit).
-    Faible = yeux plissés (douleur)."""
-    def _ear_one(top, bottom, left, right):
-        v = _dist(landmarks[top], landmarks[bottom])
-        h = _dist(landmarks[left], landmarks[right])
-        return v / h if h > 1e-6 else 0.0
-    ear_l = _ear_one(_EYE_L_TOP, _EYE_L_BOTTOM, _EYE_L_LEFT, _EYE_L_RIGHT)
-    ear_r = _ear_one(_EYE_R_TOP, _EYE_R_BOTTOM, _EYE_R_LEFT, _EYE_R_RIGHT)
-    return (ear_l + ear_r) / 2
-
-
-def _compute_brow_squeeze(landmarks):
-    """v2 : ressere des sourcils, normalise par la largeur du visage.
-
-    Faible = sourcils rapproches (frons, fronceemnt = tristesse / douleur).
-    Eleve = sourcils ecartes (etat normal).
-    """
-    brow_l = landmarks[_BROW_L_INNER]
-    brow_r = landmarks[_BROW_R_INNER]
-    fw = _face_width(landmarks)
-    if fw < 1e-6:
-        return 0.0
-    # On mesure l'ecartement horizontal des sourcils internes, normalise.
-    return _dist(brow_l, brow_r) / fw
-
-
-def _compute_brow_drop(landmarks):
-    """v2 : descente des sourcils par rapport au nez, normalisee par largeur visage.
-
-    Faible = sourcils proches du nez (sourcils baisses, frons).
-    Eleve = sourcils releves.
-    """
-    brow_l = landmarks[_BROW_L_INNER]
-    brow_r = landmarks[_BROW_R_INNER]
-    nose   = landmarks[_NOSE_TIP]
-    brow_mid_y = (brow_l.y + brow_r.y) / 2
-    fw = _face_width(landmarks)
-    if fw < 1e-6:
-        return 0.0
-    # Distance verticale brow -> nose, normalisee
-    return abs(nose.y - brow_mid_y) / fw
+    def detect(self, frame_bgr):
+        # YuNet veut la taille reelle de l'image en input
+        h, w = frame_bgr.shape[:2]
+        self._detector.setInputSize((w, h))
+        _, faces = self._detector.detect(frame_bgr)
+        if faces is None or len(faces) == 0:
+            return None
+        # faces[i] : [x, y, w, h, lm0_x, lm0_y, ..., lm4_x, lm4_y, score]
+        # On prend le plus gros visage (presume le user au premier plan)
+        face = max(faces, key=lambda f: f[2] * f[3])
+        x, y, fw, fh = [int(v) for v in face[:4]]
+        score = float(face[-1])
+        return {"bbox": (x, y, fw, fh), "score": score}
 
 
 # ---------------------------------------------------------------
-# Détection émotion combinée
+# Emotion - FER+ ONNX (8 classes -> 4)
 # ---------------------------------------------------------------
-def _detect_emotion(landmarks):
-    """v2.1 : analyse les landmarks FaceMesh et retourne (emotion, score, debug_dict).
+class _EmotionEngine:
+    # FER+ : input [1, 1, 64, 64] grayscale float32, output logits [1, 8]
+    # On softmax + mapping 8 -> 4 classes du contrat existant.
 
-    Logique calibree sur des donnees reelles webcam :
-    - HAPPY : MAR ouvert + EAR plus faible (sourire dents + yeux plisses du rire)
-    - PAIN  : MAR ouvert + sourcils tres baisses (grimace de douleur)
-    - SAD   : MAR ferme + smile tres negatif + sourcils baisses
-    """
-    mar    = _compute_mar(landmarks)
-    smile  = _compute_smile_score(landmarks)
-    ear    = _compute_ear(landmarks)
-    brow_s = _compute_brow_squeeze(landmarks)
-    brow_d = _compute_brow_drop(landmarks)
+    _FER_LABELS = [
+        "neutral", "happiness", "surprise", "sadness",
+        "anger", "disgust", "fear", "contempt",
+    ]
 
-    debug = {
-        "mar": round(mar, 3),
-        "smile": round(smile, 4),
-        "ear": round(ear, 3),
-        "brow_squeeze": round(brow_s, 4),
-        "brow_drop": round(brow_d, 4),
+    # Mapping vers contrat WALL-E (cf. brain Phase 8.4)
+    _MAP = {
+        "neutral":   "neutral",
+        "contempt":  "neutral",
+        "happiness": "happy",
+        "surprise":  "neutral",    # v2.5.1 : FER+ over-detecte surprise en concentration/lecture
+        "sadness":   "sad",
+        "anger":     "pain",
+        "disgust":   "pain",
+        "fear":      "pain",
     }
 
-    scores = {
-        "happy":   0.0,
-        "sad":     0.0,
-        "pain":    0.0,
-        "neutral": 0.3,  # Biais leger vers neutre
-    }
+    def __init__(self, model_path):
+        # CPUExecutionProvider partout (Pi 5 + Windows). XNNPACK possible plus tard si besoin perf.
+        self._session = ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+        self._input_name = self._session.get_inputs()[0].name
 
-    bouche_ouverte = mar > config.MAR_OPEN_THRESHOLD
+    def predict(self, face_crop_bgr):
+        # Preprocess : BGR -> gris -> 64x64 -> float32 [1,1,64,64]
+        gray = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
+        x = resized.astype(np.float32).reshape(1, 1, 64, 64)
 
-    # === HAPPY === bouche ouverte + yeux plisses du rire (ear bas)
-    if bouche_ouverte and ear < config.EAR_HAPPY_MAX:
-        # Plus l'ear est bas, plus le score est haut
-        intensity = (config.EAR_HAPPY_MAX - ear) * 4
-        scores["happy"] = min(1.0, 0.5 + intensity)
+        logits = self._session.run(None, {self._input_name: x})[0][0]
 
-    # === PAIN === bouche ouverte (grimace) + sourcils tres descendus
-    if bouche_ouverte and brow_d > config.BROW_DROP_PAIN_THRESHOLD:
-        intensity = (brow_d - config.BROW_DROP_PAIN_THRESHOLD) * 5
-        scores["pain"] = min(1.0, 0.5 + intensity)
+        # Softmax numeriquement stable
+        e = np.exp(logits - logits.max())
+        probs = e / e.sum()
 
-    # === SAD === bouche fermee + coins tres tombants + sourcils descendus
-    if (not bouche_ouverte
-            and smile < config.SMILE_SAD_THRESHOLD
-            and brow_d > config.BROW_DROP_SAD_THRESHOLD):
-        intensity = (config.SMILE_SAD_THRESHOLD - smile) * 10
-        intensity += (brow_d - config.BROW_DROP_SAD_THRESHOLD) * 5
-        scores["sad"] = min(1.0, 0.4 + intensity)
+        idx = int(probs.argmax())
+        raw_label = self._FER_LABELS[idx]
+        mapped = self._MAP[raw_label]
+        confidence = float(probs[idx])
 
-    # === ARBITRAGE ===
-    emotion = max(scores, key=scores.get)
-    score = scores[emotion]
-
-    if score < config.EMOTION_MIN_SCORE:
-        emotion = "neutral"
-        score = scores["neutral"]
-
-    return emotion, round(score, 2), debug
+        debug = {
+            "raw_label": raw_label,
+            "probs": {l: round(float(p), 3) for l, p in zip(self._FER_LABELS, probs)},
+        }
+        return mapped, confidence, debug
 
 
 # ---------------------------------------------------------------
-# Lissage temporel des émotions (moyenne glissante)
+# Lissage temporel (inchange v2 -> v3)
 # ---------------------------------------------------------------
 class EmotionSmoother:
-    """Lissage par moyenne glissante : evite les sauts d'emotion frame par frame."""
+    """Moyenne glissante : evite les sauts d'emotion frame par frame."""
     def __init__(self, window_size=5):
         self._history = deque(maxlen=window_size)
-        self._counts = {"neutral": 0, "happy": 0, "sad": 0, "pain": 0}
 
     def update(self, emotion):
         self._history.append(emotion)
-        # Reconstruction des counts a partir de l'historique courant
-        self._counts = {"neutral": 0, "happy": 0, "sad": 0, "pain": 0}
+        counts = {}
         for e in self._history:
-            self._counts[e] = self._counts.get(e, 0) + 1
-        # Emotion dominante = celle qui apparait le plus souvent
-        return max(self._counts, key=self._counts.get)
+            counts[e] = counts.get(e, 0) + 1
+        return max(counts, key=counts.get)
 
 
 # ---------------------------------------------------------------
-# v2.4 : Couche d'abstraction camera cross-platform
+# Wrappers camera cross-platform (inchanges v2.4 -> v3)
 # ---------------------------------------------------------------
-# Sur Pi 5 + Module 3 Wide, cv2.VideoCapture(0) ne marche pas : libcamera/picamera2
-# est obligatoire. Sur Windows / webcam USB, cv2 reste la meilleure option.
-# Les 2 wrappers exposent la meme API : .read() -> (ok, frame_bgr), .release(), .isOpened()
-
-
 class _Picamera2Capture:
     """Wrapper picamera2 qui retourne du BGR pour rester compat avec le pipeline cv2."""
     def __init__(self, width, height):
-        from picamera2 import Picamera2   # import differe : pas dispo sur Windows
+        from picamera2 import Picamera2
         self._cam = Picamera2()
         cfg = self._cam.create_video_configuration(
             main={"size": (width, height), "format": "RGB888"}
         )
         self._cam.configure(cfg)
         self._cam.start()
-        time.sleep(0.5)   # warm-up auto-expose
+        time.sleep(0.5)
         self._opened = True
 
     def read(self):
         try:
-            arr = self._cam.capture_array()           # RGB
+            arr = self._cam.capture_array()
             bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             return True, bgr
         except Exception as e:
@@ -276,10 +165,8 @@ class _Picamera2Capture:
             return False, None
 
     def release(self):
-        try:
-            self._cam.stop()
-        except Exception:
-            pass
+        try: self._cam.stop()
+        except Exception: pass
         self._opened = False
 
     def isOpened(self):
@@ -289,25 +176,18 @@ class _Picamera2Capture:
 class _CV2Capture:
     """Wrapper cv2.VideoCapture (Windows / webcam USB / Linux non-Pi)."""
     def __init__(self, index, width=None, height=None, fps=None):
-        # Sur Windows, CAP_DSHOW evite les warnings et certains soucis d'init
         backend = cv2.CAP_DSHOW if platform.system() == "Windows" else 0
         self._cap = cv2.VideoCapture(index, backend)
         if width:  self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         if height: self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         if fps:    self._cap.set(cv2.CAP_PROP_FPS, fps)
 
-    def read(self):
-        return self._cap.read()
-
-    def release(self):
-        self._cap.release()
-
-    def isOpened(self):
-        return self._cap.isOpened()
+    def read(self):    return self._cap.read()
+    def release(self): self._cap.release()
+    def isOpened(self):return self._cap.isOpened()
 
 
 def _open_camera():
-    """Ouvre la camera selon la plateforme. Retourne un wrapper ou None si echec."""
     width  = getattr(config, "CAMERA_WIDTH",  1280)
     height = getattr(config, "CAMERA_HEIGHT", 720)
     fps    = getattr(config, "CAMERA_FPS",    30)
@@ -319,7 +199,7 @@ def _open_camera():
             logger.info("Camera : backend picamera2 (%dx%d)", width, height)
             return cam
         except Exception as e:
-            logger.warning("picamera2 KO (%s), tentative fallback cv2 (peu probable de marcher sur Pi 5 + Module 3)", e)
+            logger.warning("picamera2 KO (%s), fallback cv2", e)
 
     cam = _CV2Capture(config.CAMERA_INDEX, width, height, fps)
     if not cam.isOpened():
@@ -330,10 +210,11 @@ def _open_camera():
 
 
 # ---------------------------------------------------------------
-# Thread vision
+# Thread vision (interface inchangee v2 -> v3)
 # ---------------------------------------------------------------
 class VisionThread(threading.Thread):
-    """Thread caméra : capture → FaceMesh → émotion → face_q."""
+    """Thread camera : capture -> YuNet -> crop face -> FER+ -> face_q."""
+
     def __init__(self, face_q, stop_event=None):
         super().__init__(name="VisionThread", daemon=True)
         self.face_q = face_q
@@ -341,24 +222,32 @@ class VisionThread(threading.Thread):
         self._smoother = EmotionSmoother(config.EMOTION_SMOOTHING)
         self._frame_count = 0
         self._fps = 0.0
-        self._last_frame = None  # Dernier frame pour debug/affichage externe
+        self._last_frame = None
+
+        # Chargement des modeles (au boot du thread, fail-fast si manquants)
+        models_dir = Path(getattr(config, "MODELS_DIR", "models"))
+        yunet_path   = models_dir / "face_detection_yunet_2023mar.onnx"
+        ferplus_path = models_dir / "emotion-ferplus-8.onnx"
+
+        if not yunet_path.exists() or not ferplus_path.exists():
+            raise FileNotFoundError(
+                f"Modeles ONNX manquants dans {models_dir.resolve()}. "
+                "Lance : python models/download_models.py"
+            )
+
+        self._detector = _YuNetDetector(
+            yunet_path,
+            score_threshold=config.VISION_MIN_CONFIDENCE,
+        )
+        self._emotion = _EmotionEngine(ferplus_path)
+        logger.info("Modeles ONNX charges (YuNet + FER+)")
 
     def run(self):
-        logger.info("Démarrage du thread vision")
+        logger.info("Demarrage du thread vision")
         cap = _open_camera()
         if cap is None:
-            logger.error("Impossible d'ouvrir la caméra (cv2 et picamera2 indisponibles)")
+            logger.error("Impossible d'ouvrir la camera")
             return
-
-        # Init FaceMesh
-        mp_face = mp.solutions.face_mesh
-        face_mesh = mp_face.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=config.VISION_MAX_FACES,
-            refine_landmarks=True,
-            min_detection_confidence=config.VISION_MIN_CONFIDENCE,
-            min_tracking_confidence=0.5,
-        )
 
         fps_timer = time.time()
         fps_count = 0
@@ -381,43 +270,51 @@ class VisionThread(threading.Thread):
                     fps_count = 0
                     fps_timer = now
 
-                # Conversion BGR -> RGB pour MediaPipe
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh.process(rgb)
+                face = self._detector.detect(frame)
 
-                if results.multi_face_landmarks:
-                    landmarks = results.multi_face_landmarks[0].landmark
-                    emotion_raw, score, debug_vals = _detect_emotion(landmarks)
-                    emotion_smoothed = self._smoother.update(emotion_raw)
+                if face is None:
+                    # Pas de visage detecte
+                    self._push(FaceData(detected=False, emotion="neutral", confidence=0.0))
+                    continue
 
-                    # Log periodique pour debug (toutes les 30 frames ~= 2s)
-                    if config.VISION_DEBUG_LOG and self._frame_count % 30 == 0:
-                        logger.debug(
-                            "Frame %d: raw=%s lisse=%s score=%.2f | %s",
-                            self._frame_count, emotion_raw, emotion_smoothed,
-                            score, debug_vals
-                        )
+                x, y, fw, fh = face["bbox"]
 
-                    fd = FaceData(
-                        detected=True,
-                        emotion=emotion_smoothed,
-                        confidence=score,
-                        debug=debug_vals,
+                # Clamp dans les limites de l'image (YuNet peut sortir des bbox legerement out-of-bounds)
+                h_img, w_img = frame.shape[:2]
+                x1 = max(0, x); y1 = max(0, y)
+                x2 = min(w_img, x + fw); y2 = min(h_img, y + fh)
+                if x2 - x1 < 20 or y2 - y1 < 20:
+                    # Crop degenere, on skip
+                    self._push(FaceData(detected=False, emotion="neutral", confidence=0.0))
+                    continue
+
+                crop = frame[y1:y2, x1:x2]
+                emotion_raw, score, debug_vals = self._emotion.predict(crop)
+                emotion_smoothed = self._smoother.update(emotion_raw)
+
+                # Log periodique (toutes les 30 frames ~= 2s)
+                if config.VISION_DEBUG_LOG and self._frame_count % 30 == 0:
+                    logger.debug(
+                        "Frame %d: raw=%s lisse=%s conf=%.2f bbox=%s | %s",
+                        self._frame_count, emotion_raw, emotion_smoothed,
+                        score, face["bbox"], debug_vals
                     )
-                    try:
-                        self.face_q.put_nowait(fd)
-                    except Exception:
-                        # Queue pleine - on drop
-                        pass
-                else:
-                    # Pas de visage : on pousse un FaceData neutre
-                    fd = FaceData(detected=False, emotion="neutral", confidence=0.0)
-                    try:
-                        self.face_q.put_nowait(fd)
-                    except Exception:
-                        pass
+
+                self._push(FaceData(
+                    detected=True,
+                    emotion=emotion_smoothed,
+                    confidence=score,
+                    bbox=face["bbox"],
+                    debug=debug_vals,
+                ))
 
         finally:
             cap.release()
-            face_mesh.close()
-            logger.info("Thread vision arrêté (FPS moyen : %.1f)", self._fps)
+            logger.info("Thread vision arrete (FPS moyen : %.1f)", self._fps)
+
+    def _push(self, fd):
+        # Helper : push non-bloquant, drop si la queue est pleine
+        try:
+            self.face_q.put_nowait(fd)
+        except Exception:
+            pass

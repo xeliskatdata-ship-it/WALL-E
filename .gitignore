@@ -70,3 +70,6 @@ test_pronunciation.py
 
 # Fichiers de transition
 config_patch*.txt
+
+# Modeles ONNX (DL via models/download_models.py)
+models/*.onnx
